@@ -430,6 +430,53 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     event_counters.io.read_addr(w).bits := iss_uops(w).inst(26, 20)
   }
 
+  // exe branch misprediction information
+  val exe_is_ld   = Wire(Vec(exe_units.numIrfReaders, Bool()))
+  val exe_is_st   = Wire(Vec(exe_units.numIrfReaders, Bool()))
+  val exe_is_br   = Wire(Vec(exe_units.numIrfReaders, Bool()))
+  val exe_is_jalr = Wire(Vec(exe_units.numIrfReaders, Bool()))
+  val exe_is_ret  = Wire(Vec(exe_units.numIrfReaders, Bool()))
+  val exe_is_jalrcall  = Wire(Vec(exe_units.numIrfReaders, Bool()))
+
+  var tmp_idx = 0
+  for (w <- 0 until exe_units.length) {
+    val exe_unit = exe_units(w)
+    if (exe_unit.readsIrf) {
+      val uop = exe_unit.io.req.bits.uop
+      val valid = exe_unit.io.req.valid
+      exe_is_ld(tmp_idx) := valid && uop.uses_ldq 
+      exe_is_st(tmp_idx) := valid && uop.uses_stq 
+      exe_is_br(tmp_idx) := valid && uop.is_br 
+      exe_is_jalr(tmp_idx)  := valid && uop.is_jalr 
+      exe_is_ret(tmp_idx)   := valid && uop.is_jalr && (uop.ldst === 0.U) && (uop.lrs1 === 1.U)                   
+      exe_is_jalrcall(tmp_idx) := valid && uop.is_jalr && (uop.ldst === 1.U)   
+      tmp_idx += 1
+    }
+  }
+  // execution misprediction information
+  val exe_misp_br   = b2.mispredict && b2.cfi_type === CFI_BR
+  val exe_misp_jalr = b2.mispredict && b2.cfi_type === CFI_JALR
+  val exe_misp_ret  = exe_misp_jalr && (b2.uop.ldst === 0.U) && (b2.uop.lrs1 === 1.U)
+  val exe_misp_jalrcall  = exe_misp_jalr && (b2.uop.ldst === 1.U)
+  
+
+  //commit inst type
+  val com_is_ld   = Wire(Vec(coreWidth, Bool()))
+  val com_is_st   = Wire(Vec(coreWidth, Bool()))
+
+  for(w <- 0 until coreWidth) {
+    val uop = rob.io.commit.uops(w)
+    val valid = rob.io.commit.arch_valids(w)
+    com_is_ld(w) := valid && uop.uses_ldq 
+    com_is_st(w) := valid && uop.uses_stq 
+  }
+
+  //exception information
+  val misalign_excpt = csr.io.exception && (csr.io.cause === Causes.misaligned_load.U || csr.io.cause === Causes.misaligned_store.U)
+  val lstd_pagefault = csr.io.exception && (csr.io.cause === Causes.load_page_fault.U || csr.io.cause === Causes.store_page_fault.U)
+  val fetch_pagefault = csr.io.exception && (csr.io.cause === Causes.fetch_page_fault.U)
+
+
   //update nowWarmupInsts
   when (sampleValid) { //usemode
     switch (sampleEventSel){
@@ -456,6 +503,23 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     event_counters.io.event_signals(6) :=  Mux(io.ifu.itlb_hit, 1.U, 0.U) //itlb hit number
     event_counters.io.event_signals(7) :=  Mux(io.ifu.perf.tlbMiss, 1.U, 0.U) //i-tlb start ptw
     // TODO
+  
+    event_counters.io.event_signals(31) :=  PopCount(exe_is_ld.asUInt)       //execute ld number
+    event_counters.io.event_signals(32) :=  PopCount(exe_is_st.asUInt)       //execute st number
+    event_counters.io.event_signals(33) :=  io.lsu.dtlb_valid_access            //valid dtlb req number
+    event_counters.io.event_signals(34) :=  io.lsu.dtlb_miss_num              //dtlb miss number
+    event_counters.io.event_signals(35) :=  Mux(io.lsu.perf.tlbMiss, 1.U, 0.U)  //d-tlb miss
+    event_counters.io.event_signals(36) :=  io.lsu.dcache_valid_access   //valid dcache access number
+    event_counters.io.event_signals(37) :=  io.lsu.dcache_nack_num   //d-cache load & store nack number
+    event_counters.io.event_signals(38) :=  Mux(io.lsu.perf.acquire, 1.U, 0.U) //dcache send req to next level number
+
+    event_counters.io.event_signals(47) :=  PopCount(com_is_ld.asUInt)       //commit ld number
+    event_counters.io.event_signals(48) :=  PopCount(com_is_st.asUInt)       //commit st number
+
+    event_counters.io.event_signals(57) :=  Mux(io.ptw.perf.l2miss, 1.U, 0.U) //L2 TLB miss
+    event_counters.io.event_signals(58) :=  Mux(misalign_excpt, 1.U, 0.U)  //misalign_excpt
+    event_counters.io.event_signals(59) :=  Mux(lstd_pagefault, 1.U, 0.U)  //lstd_pagefault
+    event_counters.io.event_signals(60) :=  Mux(fetch_pagefault, 1.U, 0.U)  //fetch_pagefault
   }
 
   //-------------------------------------------------------------
