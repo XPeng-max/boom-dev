@@ -68,6 +68,7 @@ class BoomDCacheReq(implicit p: Parameters) extends BoomBundle()(p)
   val addr  = UInt(coreMaxAddrBits.W)
   val data  = Bits(coreDataBits.W)
   val is_hella = Bool() // Is this the hellacache req? If so this is not tracked in LDQ or STQ
+  val vaddr = UInt(coreMaxAddrBits.W) // 添加虚拟地址字段
 }
 
 class BoomDCacheResp(implicit p: Parameters) extends BoomBundle()(p)
@@ -778,6 +779,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     dmem_req(w).bits.addr  := 0.U
     dmem_req(w).bits.data  := 0.U
     dmem_req(w).bits.is_hella := false.B
+    dmem_req(w).bits.vaddr := 0.U // 初始化虚拟地址字段
 
     io.dmem.s1_kill(w) := false.B
 
@@ -785,6 +787,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).valid      := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
       dmem_req(w).bits.addr  := exe_tlb_paddr(w)
       dmem_req(w).bits.uop   := exe_tlb_uop(w)
+      dmem_req(w).bits.vaddr := exe_tlb_vaddr(w) // 设置虚拟地址（load请求）
 
       s0_executing_loads(ldq_incoming_idx(w)) := dmem_req_fire(w)
       assert(!ldq_incoming_e(w).bits.executed)
@@ -792,6 +795,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).valid      := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
       dmem_req(w).bits.addr  := exe_tlb_paddr(w)
       dmem_req(w).bits.uop   := exe_tlb_uop(w)
+      dmem_req(w).bits.vaddr := exe_tlb_vaddr(w) // 设置虚拟地址（load请求）
 
       s0_executing_loads(ldq_retry_idx) := dmem_req_fire(w)
       assert(!ldq_retry_e.bits.executed)
@@ -803,6 +807,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
                                     stq_commit_e.bits.data.bits,
                                     coreDataBytes)).data
       dmem_req(w).bits.uop      := stq_commit_e.bits.uop
+      // 对于store，不传递虚拟地址，设置为0
+      dmem_req(w).bits.vaddr    := 0.U
 
       stq_execute_head                     := Mux(dmem_req_fire(w),
                                                 WrapInc(stq_execute_head, numStqEntries),
@@ -813,6 +819,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).valid      := true.B
       dmem_req(w).bits.addr  := ldq_wakeup_e.bits.addr.bits
       dmem_req(w).bits.uop   := ldq_wakeup_e.bits.uop
+      dmem_req(w).bits.vaddr := 0.U
 
       s0_executing_loads(ldq_wakeup_idx) := dmem_req_fire(w)
 
@@ -822,6 +829,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
       dmem_req(w).valid               := !io.hellacache.s1_kill && (!exe_tlb_miss(w) || hella_req.phys)
       dmem_req(w).bits.addr           := exe_tlb_paddr(w)
+      dmem_req(w).bits.vaddr          := 0.U // hella请求不传递虚拟地址
       dmem_req(w).bits.data           := (new freechips.rocketchip.rocket.StoreGen(
         hella_req.size, 0.U,
         io.hellacache.s1_data.data,
@@ -838,6 +846,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       assert(hella_state === h_replay)
       dmem_req(w).valid               := true.B
       dmem_req(w).bits.addr           := hella_paddr
+      dmem_req(w).bits.vaddr          := 0.U // hella wakeup不传递虚拟地址
       dmem_req(w).bits.data           := (new freechips.rocketchip.rocket.StoreGen(
         hella_req.size, 0.U,
         hella_data.data,

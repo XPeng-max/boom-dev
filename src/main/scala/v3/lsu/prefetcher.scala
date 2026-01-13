@@ -27,7 +27,9 @@ abstract class DataPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends B
     val mshr_avail = Input(Bool())
     val req_val    = Input(Bool())
     val req_addr   = Input(UInt(coreMaxAddrBits.W))
+    val req_vaddr  = Input(UInt(coreMaxAddrBits.W))
     val req_coh    = Input(new ClientMetadata)
+    val req_pc     = Input(UInt(coreMaxAddrBits.W))
 
     val prefetch   = Decoupled(new BoomDCacheReq)
   })
@@ -67,4 +69,9 @@ class NLPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetch
   io.prefetch.bits.uop         := NullMicroOp
   io.prefetch.bits.uop.mem_cmd := req_cmd
   io.prefetch.bits.data        := DontCare
+}
+
+class IPStridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetcher
+{
+
 }
