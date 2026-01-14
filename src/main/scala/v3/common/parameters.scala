@@ -19,6 +19,12 @@ import boom.v3.ifu._
 import boom.v3.exu._
 import boom.v3.lsu._
 
+
+case class PrefetcherParams(
+  enableNextLine: Boolean = true,
+  enableVaddrNextLine: Boolean = false,
+)
+
 /**
  * Default BOOM core parameters
  */
@@ -40,6 +46,7 @@ case class BoomCoreParams(
   numFetchBufferEntries: Int = 16,
   enableAgePriorityIssue: Boolean = true,
   enablePrefetching: Boolean = false,
+  prefetcherParams: PrefetcherParams = PrefetcherParams(),
   enableFastLoadUse: Boolean = true,
   enableCommitMapTable: Boolean = false,
   enableFastPNR: Boolean = false,
@@ -237,6 +244,8 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
 
   val enableFastLoadUse = boomParams.enableFastLoadUse
   val enablePrefetching = boomParams.enablePrefetching
+  val enableNextLinePrefetcher = boomParams.prefetcherParams.enableNextLine
+  val enableVaddrNextLinePrefetcher = boomParams.prefetcherParams.enableVaddrNextLine
   val nLBEntries = dcacheParams.nMSHRs
 
   //************************************

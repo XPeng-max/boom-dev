@@ -437,6 +437,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.rob_pnr_idx  := io.lsu.rob_pnr_idx
   mshrs.io.rob_head_idx := io.lsu.rob_head_idx
 
+  io.lsu.prefetch_translation_req <> mshrs.io.prefetch_translation_req
+  mshrs.io.prefetch_translation_resp <> io.lsu.prefetch_translation_resp
+
   // tags
   def onReset = L1Metadata(0.U, ClientMetadata.onReset)
   val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }

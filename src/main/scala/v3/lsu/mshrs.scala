@@ -540,6 +540,8 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val meta_resp  = Input(Valid(new L1Metadata))
     val replay     = Decoupled(new BoomDCacheReqInternal)
     val prefetch   = Decoupled(new BoomDCacheReq)
+    val prefetch_translation_req = new DecoupledIO(new BoomDCacheTranslationReq)
+    val prefetch_translation_resp = Flipped(new DecoupledIO(new BoomDCacheTranslationResp))
     val wb_req     = Decoupled(new WritebackReq(edge.bundle))
 
     val prober_state = Input(Valid(UInt(coreMaxAddrBits.W)))
@@ -559,10 +561,21 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   for (w <- 0 until memWidth)
     io.req(w).ready := false.B
 
-  val prefetcher: DataPrefetcher = if (enablePrefetching) Module(new NLPrefetcher)
-                                                     else Module(new NullPrefetcher)
+  val prefetcher: DataPrefetcher = if (enablePrefetching) { 
+    if (enableNextLinePrefetcher) {
+      Module(new NLPrefetcher)
+    } else if (enableVaddrNextLinePrefetcher) {
+      Module(new VAddrNLPrefetcher)
+    } else {
+      Module(new NullPrefetcher)
+    }
+   } else {
+    Module(new NullPrefetcher)
+   }
 
   io.prefetch <> prefetcher.io.prefetch
+  io.prefetch_translation_req <> prefetcher.io.prefetch_translation_req
+  prefetcher.io.prefetch_translation_resp <> io.prefetch_translation_resp
 
 
   val cacheable = edge.manager.supportsAcquireBFast(req.bits.addr, lgCacheBlockBytes.U)

@@ -52,6 +52,7 @@ import freechips.rocketchip.util.Str
 import boom.v3.common._
 import boom.v3.exu.{BrUpdateInfo, Exception, FuncUnitResp, CommitSignals, ExeUnitResp}
 import boom.v3.util.{BoolToChar, AgePriorityEncoder, IsKilledByBranch, GetNewBrMask, WrapInc, IsOlder, UpdateBrMask}
+import os.write.over
 
 class LSUExeIO(implicit p: Parameters) extends BoomBundle()(p)
 {
@@ -69,6 +70,17 @@ class BoomDCacheReq(implicit p: Parameters) extends BoomBundle()(p)
   val data  = Bits(coreDataBits.W)
   val is_hella = Bool() // Is this the hellacache req? If so this is not tracked in LDQ or STQ
   val vaddr = UInt(coreMaxAddrBits.W) // 添加虚拟地址字段
+}
+
+class BoomDCacheTranslationReq(implicit p: Parameters) extends BoomBundle()(p)
+{
+  val translation_vaddr = UInt(coreMaxAddrBits.W)// 需要翻译的虚拟地址
+}
+
+class BoomDCacheTranslationResp(implicit p: Parameters) extends BoomBundle()(p)
+{
+  val translation_paddr = UInt(coreMaxAddrBits.W)  // 翻译后的物理地址
+  val translation_miss  = Bool()         // 翻译是否缺失(TLB miss)
 }
 
 class BoomDCacheResp(implicit p: Parameters) extends BoomBundle()(p)
@@ -105,6 +117,8 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
     val release = Bool()
   })
 
+  val prefetch_translation_req = Flipped(new DecoupledIO(new BoomDCacheTranslationReq))
+  val prefetch_translation_resp = new DecoupledIO(new BoomDCacheTranslationResp)
 }
 
 class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
@@ -250,21 +264,28 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val hella_paddr           = Reg(UInt(paddrBits.W))
   val hella_xcpt            = Reg(new rocket.HellaCacheExceptions)
 
+  // 为预取器分配一个额外的TLB端口
+  val prefetch_tlb_idx = memWidth
 
+  // 使用新的NBDTLB类定义，指定TLB端口数量为memWidth+1
   val dtlb = Module(new NBDTLB(
-    instruction = false, lgMaxSize = log2Ceil(coreDataBytes), rocket.TLBConfig(dcacheParams.nTLBSets, dcacheParams.nTLBWays)))
+    instruction = false, 
+    lgMaxSize = log2Ceil(coreDataBytes), 
+    rocket.TLBConfig(dcacheParams.nTLBSets, dcacheParams.nTLBWays),
+    numTLBPorts = memWidth + 1))
 
   io.ptw <> dtlb.io.ptw
   io.core.perf.tlbMiss := io.ptw.req.fire
   io.core.perf.acquire := io.dmem.perf.acquire
   io.core.perf.release := io.dmem.perf.release
 
-  val dtlb_valid_req = widthMap(w => dtlb.io.req(w).valid)
-  val dtlb_miss_req  = widthMap(w => dtlb.io.req(w).valid && (dtlb.io.resp(w).miss || !dtlb.io.req(w).ready))
+  // 只统计正常内存访问的TLB访问，不包括预取器的TLB访问
+  val dtlb_valid_req = (0 until memWidth).map(w => dtlb.io.req(w).valid)
+  val dtlb_miss_req  = (0 until memWidth).map(w => dtlb.io.req(w).valid && (dtlb.io.resp(w).miss || !dtlb.io.req(w).ready))
 
   //Enable_PerfCounter_Support: for lsu information
-  io.core.dtlb_valid_access := PopCount(dtlb_valid_req.asUInt)
-  io.core.dtlb_miss_num     := PopCount(dtlb_miss_req.asUInt)
+  io.core.dtlb_valid_access := PopCount(Cat(dtlb_valid_req.map(_.asUInt).reverse))
+  io.core.dtlb_miss_num     := PopCount(Cat(dtlb_miss_req.map(_.asUInt).reverse))
   //Enable_PerfCounter_Support: for lsu information
   val dcache_nack = widthMap(w => io.dmem.nack(w).valid && (io.dmem.nack(w).bits.uop.uses_ldq || io.dmem.nack(w).bits.uop.uses_stq))
   io.core.dcache_nack_num     := PopCount(dcache_nack.asUInt)
@@ -762,6 +783,11 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   io.dmem.exception      := io.core.exception
   io.dmem.rob_head_idx   := io.core.rob_head_idx
   io.dmem.rob_pnr_idx    := io.core.rob_pnr_idx
+
+  // 初始化dmem_translation_resp的所有字段
+  io.dmem.prefetch_translation_resp.valid := false.B
+  io.dmem.prefetch_translation_resp.bits.translation_paddr := 0.U
+  io.dmem.prefetch_translation_resp.bits.translation_miss := false.B
 
   val dmem_req = Wire(Vec(memWidth, Valid(new BoomDCacheReq)))
   io.dmem.req.valid := dmem_req.map(_.valid).reduce(_||_)
@@ -1677,6 +1703,38 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
                     ~(st_brkilled_mask.asUInt) &
                     ~(st_exc_killed_mask.asUInt)
 
+ // ----------
+  // 为prefetcher使用dtlb的额外端口，以处理虚拟地址到物理地址的翻译
+  // ----------
+  val prefetch_tlb_valid = WireInit(false.B)
+  val prefetch_tlb_vaddr = WireInit(0.U(vaddrBits.W))
+  
+  // 连接prefetcher的地址翻译请求
+  prefetch_tlb_valid := io.dmem.prefetch_translation_req.valid
+  prefetch_tlb_vaddr := io.dmem.prefetch_translation_req.bits.translation_vaddr
+  
+  // 将prefetcher的TLB请求连接到dtlb的额外端口
+  dtlb.io.req(prefetch_tlb_idx).valid            := prefetch_tlb_valid
+  dtlb.io.req(prefetch_tlb_idx).bits.vaddr       := prefetch_tlb_vaddr
+  dtlb.io.req(prefetch_tlb_idx).bits.size        := log2Ceil(coreDataBytes).U
+  dtlb.io.req(prefetch_tlb_idx).bits.cmd         := rocket.M_XRD // 使用rocket包中的M_XRD常量
+  dtlb.io.req(prefetch_tlb_idx).bits.passthrough := false.B
+  // TODO: 预取发起地址翻译请求时，如何设置这些权限位？
+  dtlb.io.req(prefetch_tlb_idx).bits.v           := false.B
+  dtlb.io.req(prefetch_tlb_idx).bits.prv         := io.ptw.status.prv
+ 
+  
+  // 处理翻译结果
+  val prefetch_translation_done = prefetch_tlb_valid && 
+                                 (dtlb.io.resp(prefetch_tlb_idx).miss || dtlb.io.req(prefetch_tlb_idx).ready)
+  val prefetch_translation_paddr = dtlb.io.resp(prefetch_tlb_idx).paddr
+  val prefetch_translation_miss  = dtlb.io.resp(prefetch_tlb_idx).miss
+  
+  // 将翻译结果写回给prefetcher
+  io.dmem.prefetch_translation_req.ready := dtlb.io.req(prefetch_tlb_idx).ready
+  io.dmem.prefetch_translation_resp.valid := prefetch_translation_done
+  io.dmem.prefetch_translation_resp.bits.translation_paddr := prefetch_translation_paddr
+  io.dmem.prefetch_translation_resp.bits.translation_miss := prefetch_translation_miss
 
 }
 
