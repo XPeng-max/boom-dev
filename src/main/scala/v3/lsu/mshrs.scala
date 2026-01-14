@@ -566,6 +566,8 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
       Module(new NLPrefetcher)
     } else if (enableVaddrNextLinePrefetcher) {
       Module(new VAddrNLPrefetcher)
+    } else if (enableStridePrefetcher) {
+      Module(new StridePrefetcher)
     } else {
       Module(new NullPrefetcher)
     }
