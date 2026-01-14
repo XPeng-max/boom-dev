@@ -504,6 +504,12 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     event_counters.io.event_signals(7) :=  Mux(io.ifu.perf.tlbMiss, 1.U, 0.U) //i-tlb start ptw
     // TODO
   
+    // L1 D-Cache statistics for LSU requests
+    event_counters.io.event_signals(8) := io.lsu.dcache_lsu_req_num            //dcache req number
+    event_counters.io.event_signals(9) := io.lsu.dcache_lsu_hit_num          //dcache hit number
+    event_counters.io.event_signals(10) := io.lsu.dcache_lsu_mshr_num          //dcache mshr req number
+    event_counters.io.event_signals(11) := io.lsu.dcache_lsu_nack_num          //dcache nack number
+
     event_counters.io.event_signals(31) :=  PopCount(exe_is_ld.asUInt)       //execute ld number
     event_counters.io.event_signals(32) :=  PopCount(exe_is_st.asUInt)       //execute st number
     event_counters.io.event_signals(33) :=  io.lsu.dtlb_valid_access            //valid dtlb req number

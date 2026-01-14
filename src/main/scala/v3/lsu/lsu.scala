@@ -119,6 +119,13 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
 
   val prefetch_translation_req = Flipped(new DecoupledIO(new BoomDCacheTranslationReq))
   val prefetch_translation_resp = new DecoupledIO(new BoomDCacheTranslationResp)
+
+  //Enable_PerfCounter_Support: for dcache information
+  // dcache directly counter statistics
+  val dcache_lsu_req_num      = Input(UInt(4.W))
+  val dcache_lsu_hit_num      = Input(UInt(4.W))
+  val dcache_lsu_mshr_num     = Input(UInt(4.W))
+  val dcache_lsu_nack_num     = Input(UInt(4.W))
 }
 
 class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
@@ -174,6 +181,13 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   val dtlb_miss_num     = Output(UInt(4.W))
   val dcache_valid_access  = Output(UInt(4.W))
   val dcache_nack_num      = Output(UInt(4.W))
+
+  //Enable_PerfCounter_Support: for dcache information
+  // dcache directly counter statistics
+  val dcache_lsu_req_num      = Output(UInt(4.W))
+  val dcache_lsu_hit_num      = Output(UInt(4.W))
+  val dcache_lsu_mshr_num     = Output(UInt(4.W))
+  val dcache_lsu_nack_num     = Output(UInt(4.W))
 }
 
 class LSUIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
@@ -290,6 +304,12 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val dcache_nack = widthMap(w => io.dmem.nack(w).valid && (io.dmem.nack(w).bits.uop.uses_ldq || io.dmem.nack(w).bits.uop.uses_stq))
   io.core.dcache_nack_num     := PopCount(dcache_nack.asUInt)
 
+  //Enable_PerfCounter_Support: for dcache information
+  // dcache directly counter statistics
+  io.core.dcache_lsu_req_num   := io.dmem.dcache_lsu_req_num
+  io.core.dcache_lsu_hit_num     := io.dmem.dcache_lsu_hit_num
+  io.core.dcache_lsu_mshr_num    := io.dmem.dcache_lsu_mshr_num
+  io.core.dcache_lsu_nack_num    := io.dmem.dcache_lsu_nack_num
 
   val clear_store     = WireInit(false.B)
   val live_store_mask = RegInit(0.U(numStqEntries.W))

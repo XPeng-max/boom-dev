@@ -739,6 +739,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   for (w <- 0 until memWidth)
     assert(!(s2_send_resp(w) && s2_send_nack(w)))
 
+  //Enable_PerfCounter_Support: for dcache information
+  io.lsu.dcache_lsu_req_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_lsu).asUInt)
+  io.lsu.dcache_lsu_hit_num := PopCount(widthMap(w => s2_hit(w) && s2_type === t_lsu).asUInt)
+  io.lsu.dcache_lsu_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_lsu && mshrs.io.req(w).fire).asUInt)
+  io.lsu.dcache_lsu_nack_num := PopCount(widthMap(w => s2_nack(w) && s2_type === t_lsu).asUInt)
+
   // hits always send a response
   // If MSHR is not available, LSU has to replay this request later
   // If MSHR is available and this is only a store(not a amo), we don't need to wait for resp later
