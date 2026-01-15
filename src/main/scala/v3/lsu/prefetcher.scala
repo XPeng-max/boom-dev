@@ -284,7 +284,6 @@ class StrideMetaBundle(implicit p: Parameters) extends BoomBundle with HasStride
     val stride_match = new_stride === stride
     val low_confidence = confidence <= 1.U
     val can_send_pf = stride_valid && stride_match && confidence === MAX_CONF.U
-    printf("StridePrefetcher: stride mis-match, new_vaddr = %x, pre_vaddr = %x, old_stride = %d, new_stride = %d, new_stride_blk = %d, stride_match = %d, low_confidence = %d\n", new_vaddr, pre_vaddr,stride, new_stride, new_stride_blk,stride_match,low_confidence)
 
     when(stride_valid) {
       when(stride_match) {
@@ -326,29 +325,60 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s0_paddr = io.req_addr
   val s0_pc = io.req_pc
   val s0_pc_hash = pc_hash_tag(s0_pc)
+  // declare s1 registers early so they exist during elaboration
+  val s1_valid = RegInit(false.B)
+  val s1_index = RegInit(0.U(log2Up(STRIDE_ENTRY_NUM).W))
+  val s1_pc_hash = RegInit(0.U(s0_pc_hash.getWidth.W))
+  val s1_vaddr = RegInit(0.U(s0_vaddr.getWidth.W))
+  val s1_paddr = RegInit(0.U(s0_paddr.getWidth.W))
+  val s1_hit = RegInit(false.B)
+
   val s0_pc_match_vec = VecInit(array zip valids map { case (e, v) => e.tag_match(v, s0_valid, s0_pc_hash) }).asUInt
-  val s0_hit = s0_pc_match_vec.orR
-  val s0_index = Mux(s0_hit, OHToUInt(s0_pc_match_vec), replacement.way)
+
+  val s0_s1_match = s0_valid && s1_valid && s0_pc_hash === s1_pc_hash
+  val s0_hit = s0_s1_match | s0_pc_match_vec.orR
+  val s0_index = Mux(s0_s1_match, s1_index, Mux(s0_hit, OHToUInt(s0_pc_match_vec), replacement.way))
 
   when(s0_valid) {
     replacement.access(s0_index)
+    // printf("StridePrefetcher s0_valid event:\n")
+    // for(i <- 0 until STRIDE_ENTRY_NUM) {
+    //   printf("StridePrefetcher array(%d) status: pre_vaddr = %x, stride = %x, confidence = %d, hash_pc = %x, valid = %d\n", i.U, array(i).pre_vaddr, array(i).stride, array(i).confidence, array(i).hash_pc, valids(i))
+    // }
+    // printf("StridePrefetcher status: s0_pc = %x, s0_pc_hash = %x, s0_hit = %d, s0_index = %d, s0_pc_match_vec = %x\n\n", s0_pc, s0_pc_hash, s0_hit, s0_index, s0_pc_match_vec)
   }
 
   assert(PopCount(s0_pc_match_vec) <= 1.U)
 
   // s1: alloc or update
-  val s1_valid = RegNext(s0_valid && s0_vaddr =/= 0.U)
-  val s1_index = RegEnable(s0_index, s0_valid)
-  val s1_pc_hash = RegEnable(s0_pc_hash, s0_valid)
-  val s1_vaddr = RegEnable(s0_vaddr, s0_valid)
-  val s1_paddr = RegEnable(s0_paddr, s0_valid)
-  val s1_hit = RegEnable(s0_hit, s0_valid)
+  // Replace RegNext/RegEnable patterns with explicit RegInit + conditional updates
+  // to avoid forward-reference issues that can produce null chisel nodes.
+
+  when (s0_valid) {
+    s1_valid := s0_vaddr =/= 0.U
+    s1_index := s0_index
+    s1_pc_hash := s0_pc_hash
+    s1_vaddr := s0_vaddr
+    s1_paddr := s0_paddr
+    s1_hit := s0_hit
+  } .otherwise {
+    s1_valid := false.B
+  }
+
   val s1_alloc = s1_valid && !s1_hit
   val s1_update = s1_valid && s1_hit
   val s1_stride = array(s1_index).stride
   val s1_new_stride = WireInit(0.U(STRIDE_BITS.W))
   val s1_can_send_pf = WireInit(false.B)
   s0_can_accept := !(s1_valid && s1_pc_hash === s0_pc_hash)
+
+  // when(s1_valid) {
+  //   printf("StridePrefetcher s1_valid event:\n")
+  //   for(i <- 0 until STRIDE_ENTRY_NUM) {
+  //     printf("StridePrefetcher array(%d) status: pre_vaddr = %x, stride = %x, confidence = %d, hash_pc = %x, valid = %d\n", i.U, array(i).pre_vaddr, array(i).stride, array(i).confidence, array(i).hash_pc, valids(i))
+  //   }
+  //   printf("StridePrefetcher status: s1_pc_hash = %x, s1_hit = %d, s1_index = %d, s1_paddr = %x, s1_vaddr = %x\n\n", s1_pc_hash, s1_hit, s1_index, s1_paddr, s1_vaddr)
+  // }
 
   val always_update = ALWAYS_UPDATE_PRE_VADDR.B
 
@@ -358,10 +388,12 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
       vaddr = s1_vaddr,
       alloc_hash_pc = s1_pc_hash
     )
+    // printf("StridePrefetcher s1_alloc event: array(s1_index = %d) <-  s1_pc_hash = %x, vaddr = %x\n", s1_index, s1_pc_hash, s1_vaddr)
   }.elsewhen(s1_update) {
     val res = array(s1_index).update(s1_vaddr, always_update)
     s1_can_send_pf := res._1
     s1_new_stride := res._2
+    // printf("StridePrefetcher s1_update event: array(s1_index = %d) updated with s1_pc_hash = %x, vaddr = %x, can_send_pf = %d, new_stride = %x\n", s1_index, s1_pc_hash, s1_vaddr, res._1, res._2)
   }
 
   val stride_ratio = STRIDE_DEPTH_RATIO.U
