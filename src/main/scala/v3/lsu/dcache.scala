@@ -741,9 +741,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   //Enable_PerfCounter_Support: for dcache information
   io.lsu.dcache_lsu_req_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_lsu).asUInt)
-  io.lsu.dcache_lsu_hit_num := PopCount(widthMap(w => s2_hit(w) && s2_type === t_lsu).asUInt)
+  io.lsu.dcache_lsu_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && s2_type === t_lsu).asUInt)
   io.lsu.dcache_lsu_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_lsu && mshrs.io.req(w).fire).asUInt)
-  io.lsu.dcache_lsu_nack_num := PopCount(widthMap(w => s2_nack(w) && s2_type === t_lsu).asUInt)
+  io.lsu.dcache_lsu_nack_num := PopCount(widthMap(w => s2_valid(w) && s2_nack(w) && s2_type === t_lsu).asUInt)
 
   // hits always send a response
   // If MSHR is not available, LSU has to replay this request later
