@@ -21,6 +21,26 @@ import boom.v3.exu.BrUpdateInfo
 import boom.v3.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, UpdateBrMask, AgePriorityEncoder, WrapInc, Transpose}
 
 
+// Extension of L1Metadata to include prefetch information
+class L1BoomMetaData(implicit p: Parameters) extends L1Metadata()(p) {
+  val prefetch_info = UInt(1.W)
+}
+
+object L1BoomMetaData {
+  def apply(tag: Bits, coh: ClientMetadata, prefetch_info: UInt = 0.U)(implicit p: Parameters) = {
+    val meta = Wire(new L1BoomMetaData)
+    meta.tag := tag
+    meta.coh := coh
+    meta.prefetch_info := prefetch_info
+    meta
+  }
+}
+
+// Extension of L1MetaWriteReq to use BoomL1MetaData
+class BoomL1MetaWriteReq(implicit p: Parameters) extends L1MetaReadReq()(p) {
+  val data = new L1BoomMetaData
+}
+
 class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
   val io = IO(new Bundle {
     val req = Flipped(Decoupled(new WritebackReq(edge.bundle)))
@@ -147,7 +167,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     val req = Flipped(Decoupled(new TLBundleB(edge.bundle)))
     val rep = Decoupled(new TLBundleC(edge.bundle))
     val meta_read = Decoupled(new L1MetaReadReq)
-    val meta_write = Decoupled(new L1MetaWriteReq)
+    val meta_write = Decoupled(new BoomL1MetaWriteReq)
     val wb_req = Decoupled(new WritebackReq(edge.bundle))
     val way_en = Input(UInt(nWays.W))
     val wb_rdy = Input(Bool()) // Is writeback unit currently busy? If so need to retry meta read when its done
@@ -196,6 +216,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_write.bits.tag := req_tag
   io.meta_write.bits.data.tag := req_tag
   io.meta_write.bits.data.coh := new_coh
+  io.meta_write.bits.data.prefetch_info := 0.U
 
   io.wb_req.valid := state === s_writeback_req
   io.wb_req.bits.source := req.source
@@ -441,9 +462,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.prefetch_translation_resp <> io.lsu.prefetch_translation_resp
 
   // tags
-  def onReset = L1Metadata(0.U, ClientMetadata.onReset)
+  def onReset = L1BoomMetaData(0.U, ClientMetadata.onReset)
   val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
-  val metaWriteArb = Module(new Arbiter(new L1MetaWriteReq, 2))
+  val metaWriteArb = Module(new Arbiter(new BoomL1MetaWriteReq, 2))
   // 0 goes to MSHR refills, 1 goes to prober
   val metaReadArb = Module(new Arbiter(new BoomL1MetaReadReq, 6))
   // 0 goes to MSHR replays, 1 goes to prober, 2 goes to wb, 3 goes to MSHR meta read,
@@ -646,6 +667,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_tag_match_way = RegNext(s1_tag_match_way)
   val s2_tag_match     = s2_tag_match_way.map(_.orR)
   val s2_hit_state     = widthMap(i => Mux1H(s2_tag_match_way(i), wayMap((w: Int) => RegNext(meta(i).io.resp(w).coh))))
+  val s2_prefetch_info = widthMap(i => Mux1H(s2_tag_match_way(i), wayMap((w: Int) => RegNext(meta(i).io.resp(w).prefetch_info))))
   val s2_has_permission = widthMap(w => s2_hit_state(w).onAccess(s2_req(w).uop.mem_cmd)._1)
   val s2_new_hit_state  = widthMap(w => s2_hit_state(w).onAccess(s2_req(w).uop.mem_cmd)._3)
 
@@ -744,6 +766,11 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   io.lsu.dcache_lsu_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && s2_type === t_lsu).asUInt)
   io.lsu.dcache_lsu_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_lsu && mshrs.io.req(w).fire).asUInt)
   io.lsu.dcache_lsu_nack_num := PopCount(widthMap(w => s2_valid(w) && s2_nack(w) && s2_type === t_lsu).asUInt)
+  io.lsu.dcache_lsu_prefetch_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && s2_type === t_lsu && s2_prefetch_info(w) === 1.U).asUInt)
+  io.lsu.dcache_prefetch_req_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch).asUInt)
+  io.lsu.dcache_prefetch_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && s2_type === t_prefetch).asUInt)
+  io.lsu.dcache_prefetch_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && mshrs.io.req(w).fire).asUInt)
+  io.lsu.dcache_prefetch_nack_num := PopCount(widthMap(w => s2_valid(w) && s2_nack(w) && s2_type === t_prefetch).asUInt)
 
   // hits always send a response
   // If MSHR is not available, LSU has to replay this request later
@@ -771,11 +798,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     mshrs.io.req(w).bits.addr        := s2_req(w).addr
     mshrs.io.req(w).bits.vaddr       := s2_req(w).vaddr
     mshrs.io.req(w).bits.tag_match   := s2_tag_match(w)
-    mshrs.io.req(w).bits.old_meta    := Mux(s2_tag_match(w), L1Metadata(s2_repl_meta(w).tag, s2_hit_state(w)), s2_repl_meta(w))
+    mshrs.io.req(w).bits.old_meta    := Mux(s2_tag_match(w), L1BoomMetaData(s2_repl_meta(w).tag, s2_hit_state(w)), s2_repl_meta(w))
     mshrs.io.req(w).bits.way_en      := Mux(s2_tag_match(w), s2_tag_match_way(w), s2_replaced_way_en)
 
     mshrs.io.req(w).bits.data        := s2_req(w).data
     mshrs.io.req(w).bits.is_hella    := s2_req(w).is_hella
+    mshrs.io.req(w).bits.prefetch_info := Mux(isPrefetch(s2_req(w).uop.mem_cmd) || (s2_type === t_prefetch), 1.U, 0.U)
     mshrs.io.req_is_probe(w)         := s2_type === t_probe && s2_valid(w)
   }
 

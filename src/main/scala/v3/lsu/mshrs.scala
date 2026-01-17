@@ -25,12 +25,13 @@ class BoomDCacheReqInternal(implicit p: Parameters) extends BoomDCacheReq()(p)
 {
   // miss info
   val tag_match = Bool()
-  val old_meta  = new L1Metadata
+  val old_meta  = new boom.v3.lsu.L1BoomMetaData
   val way_en    = UInt(nWays.W)
 
   // Used in the MSHRs
   val sdq_id    = UInt(log2Ceil(cfg.nSDQ).W)
   override val vaddr = UInt(coreMaxAddrBits.W)
+  val prefetch_info = UInt(1.W)
 }
 
 
@@ -68,9 +69,9 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
     val refill      = Decoupled(new L1DataWriteReq)
 
-    val meta_write  = Decoupled(new L1MetaWriteReq)
+    val meta_write  = Decoupled(new boom.v3.lsu.BoomL1MetaWriteReq)
     val meta_read   = Decoupled(new L1MetaReadReq)
-    val meta_resp   = Input(Valid(new L1Metadata))
+    val meta_resp   = Input(Valid(new boom.v3.lsu.L1BoomMetaData))
     val wb_req      = Decoupled(new WritebackReq(edge.bundle))
 
     // To inform the prefetcher when we are commiting the fetch of this line
@@ -187,6 +188,10 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
   when (io.req_sec_val && io.req_sec_rdy) {
     req.uop.mem_cmd := dirtier_cmd
+    // Update prefetch info if new secondary miss is a prefetch and we haven't written meta yet
+    when (io.req.prefetch_info =/= 0.U) {
+      req.prefetch_info := io.req.prefetch_info
+    }
     when (is_hit_again) {
       new_coh := dirtier_coh
     }
@@ -316,6 +321,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.data.coh := coh_on_clear
     io.meta_write.bits.data.tag := req_tag
     io.meta_write.bits.way_en   := req.way_en
+    io.meta_write.bits.data.prefetch_info := req.prefetch_info
 
     when (io.meta_write.fire) {
       state      := s_wb_req
@@ -371,6 +377,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.data.coh := new_coh
     io.meta_write.bits.data.tag := req_tag
     io.meta_write.bits.way_en   := req.way_en
+    io.meta_write.bits.data.prefetch_info := req.prefetch_info
     when (io.meta_write.fire) {
       state := s_mem_finish_1
       finish_to_prefetch := false.B
@@ -535,9 +542,9 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val mem_finish   = Decoupled(new TLBundleE(edge.bundle))
 
     val refill     = Decoupled(new L1DataWriteReq)
-    val meta_write = Decoupled(new L1MetaWriteReq)
+    val meta_write = Decoupled(new boom.v3.lsu.BoomL1MetaWriteReq)
     val meta_read  = Decoupled(new L1MetaReadReq)
-    val meta_resp  = Input(Valid(new L1Metadata))
+    val meta_resp  = Input(Valid(new boom.v3.lsu.L1BoomMetaData))
     val replay     = Decoupled(new BoomDCacheReqInternal)
     val prefetch   = Decoupled(new BoomDCacheReq)
     val prefetch_translation_req = new DecoupledIO(new BoomDCacheTranslationReq)
@@ -628,7 +635,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
 
   val wb_tag_list = Wire(Vec(cfg.nMSHRs, UInt(tagBits.W)))
 
-  val meta_write_arb = Module(new Arbiter(new L1MetaWriteReq           , cfg.nMSHRs))
+  val meta_write_arb = Module(new Arbiter(new BoomL1MetaWriteReq, cfg.nMSHRs))
   val meta_read_arb  = Module(new Arbiter(new L1MetaReadReq            , cfg.nMSHRs))
   val wb_req_arb     = Module(new Arbiter(new WritebackReq(edge.bundle), cfg.nMSHRs))
   val replay_arb     = Module(new Arbiter(new BoomDCacheReqInternal    , cfg.nMSHRs))
