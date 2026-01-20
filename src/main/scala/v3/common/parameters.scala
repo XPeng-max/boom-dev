@@ -24,6 +24,7 @@ case class PrefetcherParams(
   enableNextLine: Boolean = true,
   enableVaddrNextLine: Boolean = false,
   enableStride: Boolean = false,
+  enableStream: Boolean = false,
 )
 
 /**
@@ -248,6 +249,7 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   val enableNextLinePrefetcher = boomParams.prefetcherParams.enableNextLine
   val enableVaddrNextLinePrefetcher = boomParams.prefetcherParams.enableVaddrNextLine
   val enableStridePrefetcher = boomParams.prefetcherParams.enableStride
+  val enableStreamPrefetcher = boomParams.prefetcherParams.enableStream
   val nLBEntries = dcacheParams.nMSHRs
 
   //************************************

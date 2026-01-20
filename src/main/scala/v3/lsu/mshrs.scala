@@ -548,9 +548,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val meta_read  = Decoupled(new L1MetaReadReq)
     val meta_resp  = Input(Valid(new boom.v3.lsu.L1BoomMetaData))
     val replay     = Decoupled(new BoomDCacheReqInternal)
-    val prefetch   = Decoupled(new BoomDCacheReq)
-    val prefetch_translation_req = new DecoupledIO(new BoomDCacheTranslationReq)
-    val prefetch_translation_resp = Flipped(new DecoupledIO(new BoomDCacheTranslationResp))
+    // Prefetch moved to DCache - removed prefetch, prefetch_translation_req/resp
     val wb_req     = Decoupled(new WritebackReq(edge.bundle))
 
     val prober_state = Input(Valid(UInt(coreMaxAddrBits.W)))
@@ -560,6 +558,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val wb_resp   = Input(Bool())
 
     val fence_rdy = Output(Bool())
+    val mshr_avail = Output(Bool())
     val probe_rdy = Output(Bool())
   })
 
@@ -569,27 +568,6 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
 
   for (w <- 0 until memWidth)
     io.req(w).ready := false.B
-
-  val prefetcher: DataPrefetcher = if (enablePrefetching) { 
-    if (enableNextLinePrefetcher) {
-      Module(new NLPrefetcher)
-    } else if (enableVaddrNextLinePrefetcher) {
-      Module(new VAddrNLPrefetcher)
-    } else if (enableStridePrefetcher) {
-      Module(new StridePrefetcher)
-    } else if (enableStreamPrefetcher) {
-      Module(new StreamPrefetcher)
-    } else {
-      Module(new NullPrefetcher)
-    }
-   } else {
-    Module(new NullPrefetcher)
-   }
-
-  io.prefetch <> prefetcher.io.prefetch
-  io.prefetch_translation_req <> prefetcher.io.prefetch_translation_req
-  prefetcher.io.prefetch_translation_resp <> io.prefetch_translation_resp
-
 
   val cacheable = edge.manager.supportsAcquireBFast(req.bits.addr, lgCacheBlockBytes.U)
 
@@ -805,10 +783,5 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
       PriorityEncoderOH(~sdq_val(cfg.nSDQ-1,0)) & Fill(cfg.nSDQ, sdq_enq)
   }
 
-  prefetcher.io.mshr_avail    := RegNext(pri_rdy)
-  prefetcher.io.req_val       := RegNext(commit_vals.reduce(_||_))
-  prefetcher.io.req_addr      := RegNext(Mux1H(commit_vals, commit_addrs))
-  prefetcher.io.req_vaddr     := RegNext(Mux1H(commit_vals, commit_vaddrs))
-  prefetcher.io.req_coh       := RegNext(Mux1H(commit_vals, commit_cohs))
-  prefetcher.io.req_pc        := RegNext(Mux1H(commit_vals, commit_pcs))
+  io.mshr_avail    := pri_rdy
 }
