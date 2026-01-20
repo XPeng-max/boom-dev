@@ -127,6 +127,7 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val dcache_lsu_mshr_num     = Input(UInt(4.W))
   val dcache_lsu_nack_num     = Input(UInt(4.W))
   val dcache_lsu_prefetch_hit_num = Input(UInt(4.W))
+  val dcache_lsu_prefetch_first_hit_num = Input(UInt(4.W))
   val dcache_prefetch_req_num      = Input(UInt(4.W))
   val dcache_prefetch_hit_num      = Input(UInt(4.W))
   val dcache_prefetch_mshr_num     = Input(UInt(4.W))
@@ -194,6 +195,7 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   val dcache_lsu_mshr_num     = Output(UInt(4.W))
   val dcache_lsu_nack_num     = Output(UInt(4.W))
   val dcache_lsu_prefetch_hit_num = Output(UInt(4.W))
+  val dcache_lsu_prefetch_first_hit_num = Output(UInt(4.W))
   val dcache_prefetch_req_num      = Output(UInt(4.W))
   val dcache_prefetch_hit_num      = Output(UInt(4.W))
   val dcache_prefetch_mshr_num     = Output(UInt(4.W))
@@ -321,6 +323,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   io.core.dcache_lsu_mshr_num    := io.dmem.dcache_lsu_mshr_num
   io.core.dcache_lsu_nack_num    := io.dmem.dcache_lsu_nack_num
   io.core.dcache_lsu_prefetch_hit_num := io.dmem.dcache_lsu_prefetch_hit_num
+  io.core.dcache_lsu_prefetch_first_hit_num := io.dmem.dcache_lsu_prefetch_first_hit_num
   io.core.dcache_prefetch_req_num   := io.dmem.dcache_prefetch_req_num
   io.core.dcache_prefetch_hit_num     := io.dmem.dcache_prefetch_hit_num
   io.core.dcache_prefetch_mshr_num    := io.dmem.dcache_prefetch_mshr_num

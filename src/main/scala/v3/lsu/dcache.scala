@@ -39,6 +39,96 @@ object L1BoomMetaData {
 // Extension of L1MetaWriteReq to use BoomL1MetaData
 class BoomL1MetaWriteReq(implicit p: Parameters) extends L1MetaReadReq()(p) {
   val data = new L1BoomMetaData
+  val clear_visited = Bool()  // Set to true when tag changes or coh becomes Nothing
+}
+
+// Custom L1MetadataArray for BOOM that uses L1BoomMetaData consistently
+class BoomL1MetadataArray(onReset: () => L1BoomMetaData)(implicit p: Parameters) extends L1HellaCacheModule()(p) {
+  val rstVal = onReset()
+  val io = IO(new Bundle {
+    val read = Flipped(Decoupled(new L1MetaReadReq))
+    val write = Flipped(Decoupled(new BoomL1MetaWriteReq))
+    val resp = Output(Vec(nWays, new L1BoomMetaData))
+    // Visited tracking - separate from L1BoomMetaData to avoid prefetch issues
+    val visited_resp = Output(Vec(nWays, Bool()))
+    val set_visited = Input(Valid(new Bundle {
+      val idx = UInt(log2Up(nSets).W)
+      val way_en = UInt(nWays.W)
+    }))
+  })
+
+  val rst_cnt = RegInit(0.U(log2Up(nSets+1).W))
+  val rst = rst_cnt < nSets.U
+  val waddr = Mux(rst, rst_cnt, io.write.bits.idx)
+  val wdata = Mux(rst, rstVal, io.write.bits.data).asUInt
+  val wmask = Mux(rst || (nWays == 1).B, (-1).S, io.write.bits.way_en.asSInt).asBools
+  val rmask = Mux(rst || (nWays == 1).B, (-1).S, io.read.bits.way_en.asSInt).asBools
+  when (rst) { rst_cnt := rst_cnt+1.U }
+
+  val metabits = rstVal.getWidth
+  val tag_array = SyncReadMem(nSets, Vec(nWays, UInt(metabits.W)))
+  val wen = rst || io.write.valid
+  when (wen) {
+    tag_array.write(waddr, VecInit.fill(nWays)(wdata), wmask)
+  }
+  io.resp := tag_array.read(io.read.bits.idx, io.read.fire).map(_.asTypeOf(new L1BoomMetaData))
+
+  // Visited tracking array - separate from metadata to avoid affecting prefetch
+  // Semantics:
+  //   - visited=0: cache line has NOT been visited by LSU since allocation
+  //   - visited=1: cache line HAS been visited by LSU at least once
+  // On first LSU access to a cache line, s2 reads visited=0, then sets it to 1
+  // On subsequent LSU accesses (without eviction/replacement), s2 reads visited=1
+  // visited is cleared (set to 0) when:
+  //   - Reset
+  //   - Cache line is evicted or replaced (tag changes, indicated by clear_visited flag)
+  val visited_array = SyncReadMem(nSets, Vec(nWays, Bool()))
+
+  // Determine if meta write clears visited:
+  // Only clear when tag changes (new cache line allocation), indicated by clear_visited flag
+  val write_clears_visited = io.write.fire && io.write.bits.clear_visited
+
+  // Visited write logic with priority: rst > write_clear > set_visited
+  val v_wen = rst || write_clears_visited || io.set_visited.valid
+  val v_waddr = Mux(rst, rst_cnt,
+                Mux(write_clears_visited, io.write.bits.idx,
+                    io.set_visited.bits.idx))
+  val v_wdata = !(rst || write_clears_visited)  // false for reset/clear, true for set
+  // Compute masks separately to avoid type inference issues with nested Mux
+  val v_wmask_rst = VecInit(Seq.fill(nWays)(true.B))
+  val v_wmask_write = VecInit(io.write.bits.way_en.asBools)
+  val v_wmask_set = VecInit(io.set_visited.bits.way_en.asBools)
+  val v_wmask = Mux(rst, v_wmask_rst,
+                Mux(write_clears_visited, v_wmask_write, v_wmask_set))
+
+  when (v_wen) {
+    visited_array.write(v_waddr, VecInit.fill(nWays)(v_wdata), v_wmask)
+  }
+
+  // Read visited synchronously with meta read
+  val v_read_raw = visited_array.read(io.read.bits.idx, io.read.fire)
+
+  // Bypass logic for back-to-back accesses to the same cache line
+  // When a set_visited write happens in cycle N, the read issued in cycle N-1
+  // (which returns in cycle N) will get stale data. We need to bypass the new value.
+  // Record last cycle's set_visited write info
+  val last_set_valid = RegNext(io.set_visited.valid)
+  val last_set_idx = RegNext(io.set_visited.bits.idx)
+  val last_set_way_en = RegNext(io.set_visited.bits.way_en)
+  // Also record last cycle's read address for comparison
+  val last_read_idx = RegNext(io.read.bits.idx)
+  val last_read_fire = RegNext(io.read.fire)
+
+  // Bypass needed when: last cycle had a set_visited, and this cycle's read result
+  // (which was issued last cycle) is for the same idx
+  val bypass_match = last_set_valid && last_read_fire && (last_set_idx === last_read_idx)
+
+  io.visited_resp := VecInit((0 until nWays).map { w =>
+    Mux(bypass_match && last_set_way_en(w), true.B, v_read_raw(w))
+  })
+
+  io.read.ready := !wen
+  io.write.ready := !rst
 }
 
 class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
@@ -217,6 +307,8 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_write.bits.data.tag := req_tag
   io.meta_write.bits.data.coh := new_coh
   io.meta_write.bits.data.prefetch_info := 0.U
+  // Clear visited when coh becomes Nothing (invalidation by probe)
+  io.meta_write.bits.clear_visited := !new_coh.isValid()
 
   io.wb_req.valid := state === s_writeback_req
   io.wb_req.bits.source := req.source
@@ -463,7 +555,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // tags
   def onReset = L1BoomMetaData(0.U, ClientMetadata.onReset)
-  val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
+  val meta = Seq.fill(memWidth) { Module(new BoomL1MetadataArray(onReset _)) }
   val metaWriteArb = Module(new Arbiter(new BoomL1MetaWriteReq, 2))
   // 0 goes to MSHR refills, 1 goes to prober
   val metaReadArb = Module(new Arbiter(new BoomL1MetaReadReq, 6))
@@ -476,6 +568,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     meta(w).io.write.bits  := metaWriteArb.io.out.bits
     meta(w).io.read.valid  := metaReadArb.io.out.valid
     meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w)
+    // Initialize set_visited - will be connected later in s2 stage
+    meta(w).io.set_visited.valid := false.B
+    meta(w).io.set_visited.bits := DontCare
   }
   metaReadArb.io.out.ready  := meta.map(_.io.read.ready).reduce(_||_)
   metaWriteArb.io.out.ready := meta.map(_.io.write.ready).reduce(_||_)
@@ -668,6 +763,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_tag_match     = s2_tag_match_way.map(_.orR)
   val s2_hit_state     = widthMap(i => Mux1H(s2_tag_match_way(i), wayMap((w: Int) => RegNext(meta(i).io.resp(w).coh))))
   val s2_prefetch_info = widthMap(i => Mux1H(s2_tag_match_way(i), wayMap((w: Int) => RegNext(meta(i).io.resp(w).prefetch_info))))
+  // Visited tracking - read from visited_array (available in s1, RegNext for s2)
+  val s2_visited_raw = widthMap(i => Mux1H(s2_tag_match_way(i), wayMap((w: Int) => RegNext(meta(i).io.visited_resp(w)))))
   val s2_has_permission = widthMap(w => s2_hit_state(w).onAccess(s2_req(w).uop.mem_cmd)._1)
   val s2_new_hit_state  = widthMap(w => s2_hit_state(w).onAccess(s2_req(w).uop.mem_cmd)._3)
 
@@ -675,6 +772,19 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_nack = Wire(Vec(memWidth, Bool()))
   assert(!(s2_type === t_replay && !s2_hit(0)), "Replays should always hit")
   assert(!(s2_type === t_wb && !s2_hit(0)), "Writeback should always see data hit")
+
+  // Visited tracking: set on LSU hit when coh is valid
+  // Semantics: visited=0 on first LSU access to a cache line, visited=1 on subsequent accesses
+  // visited is cleared when cache line is evicted or replaced
+  // Connect set_visited for each meta array
+  for (w <- 0 until memWidth) {
+    val is_lsu_hit = s2_valid(w) && s2_hit(w) && s2_type === t_lsu && s2_hit_state(w).isValid()
+    meta(w).io.set_visited.valid := is_lsu_hit
+    meta(w).io.set_visited.bits.idx := s2_req(w).addr(idxMSB, idxLSB)
+    meta(w).io.set_visited.bits.way_en := s2_tag_match_way(w)
+  }
+  // s2_visited: no forwarding - first access reads 0, subsequent accesses read 1
+  val s2_visited = s2_visited_raw
 
   val s2_wb_idx_matches = RegNext(s1_wb_idx_matches)
 
@@ -771,6 +881,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   io.lsu.dcache_prefetch_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && s2_type === t_prefetch).asUInt)
   io.lsu.dcache_prefetch_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && mshrs.io.req(w).fire).asUInt)
   io.lsu.dcache_prefetch_nack_num := PopCount(widthMap(w => s2_valid(w) && s2_nack(w) && s2_type === t_prefetch).asUInt)
+  io.lsu.dcache_lsu_prefetch_first_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && s2_type === t_lsu && s2_prefetch_info(w) === 1.U && s2_visited(w) === 0.U).asUInt)
 
   // hits always send a response
   // If MSHR is not available, LSU has to replay this request later

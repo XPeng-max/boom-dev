@@ -322,6 +322,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.data.tag := req_tag
     io.meta_write.bits.way_en   := req.way_en
     io.meta_write.bits.data.prefetch_info := req.prefetch_info
+    io.meta_write.bits.clear_visited := true.B  // coh_on_clear is Nothing, cache line invalidated
 
     when (io.meta_write.fire) {
       state      := s_wb_req
@@ -378,6 +379,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.data.tag := req_tag
     io.meta_write.bits.way_en   := req.way_en
     io.meta_write.bits.data.prefetch_info := req.prefetch_info
+    io.meta_write.bits.clear_visited := !req.tag_match  // Clear visited only when tag changes (new cache line)
     when (io.meta_write.fire) {
       state := s_mem_finish_1
       finish_to_prefetch := false.B
@@ -575,6 +577,8 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
       Module(new VAddrNLPrefetcher)
     } else if (enableStridePrefetcher) {
       Module(new StridePrefetcher)
+    } else if (enableStreamPrefetcher) {
+      Module(new StreamPrefetcher)
     } else {
       Module(new NullPrefetcher)
     }
