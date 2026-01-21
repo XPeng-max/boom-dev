@@ -62,6 +62,7 @@ class NullPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefet
   // 默认不需要进行地址翻译
   io.prefetch_translation_req.valid := false.B
   io.prefetch_translation_req.bits.translation_vaddr := DontCare
+  io.prefetch_translation_resp.ready := false.B
 }
 
 /**
