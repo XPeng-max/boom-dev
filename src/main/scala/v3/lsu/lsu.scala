@@ -132,6 +132,7 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val dcache_prefetch_hit_num      = Input(UInt(4.W))
   val dcache_prefetch_mshr_num     = Input(UInt(4.W))
   val dcache_prefetch_nack_num     = Input(UInt(4.W))
+  val dcache_prefetch_cache_line_num = Input(UInt(4.W))
 }
 
 class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
@@ -200,6 +201,7 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   val dcache_prefetch_hit_num      = Output(UInt(4.W))
   val dcache_prefetch_mshr_num     = Output(UInt(4.W))
   val dcache_prefetch_nack_num     = Output(UInt(4.W))
+  val dcache_prefetch_cache_line_num = Output(UInt(4.W))
 }
 
 class LSUIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
@@ -328,6 +330,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   io.core.dcache_prefetch_hit_num     := io.dmem.dcache_prefetch_hit_num
   io.core.dcache_prefetch_mshr_num    := io.dmem.dcache_prefetch_mshr_num
   io.core.dcache_prefetch_nack_num    := io.dmem.dcache_prefetch_nack_num
+  io.core.dcache_prefetch_cache_line_num := io.dmem.dcache_prefetch_cache_line_num
 
   val clear_store     = WireInit(false.B)
   val live_store_mask = RegInit(0.U(numStqEntries.W))
