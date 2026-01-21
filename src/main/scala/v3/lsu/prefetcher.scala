@@ -76,7 +76,7 @@ class NLPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetch
 
   val mshr_req_addr = io.req_addr + cacheBlockBytes.U
   val cacheable = edge.manager.supportsAcquireBSafe(mshr_req_addr, lgCacheBlockBytes.U)
-  when (io.req_val && cacheable) {
+  when (io.req_val && cacheable && io.req_miss) {
     req_valid := true.B
     req_addr  := mshr_req_addr
     req_cmd   := Mux(ClientStates.hasWritePermission(io.req_coh.state), M_PFW, M_PFR)
