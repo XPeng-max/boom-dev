@@ -576,21 +576,32 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.rob_head_idx := io.lsu.rob_head_idx
 
 
-  val prefetcher: DataPrefetcher = if (enablePrefetching) { 
-    if (enableNextLinePrefetcher) {
-      Module(new NLPrefetcher)
-    } else if (enableVaddrNextLinePrefetcher) {
-      Module(new VAddrNLPrefetcher)
-    } else if (enableStridePrefetcher) {
-      Module(new StridePrefetcher)
-    } else if (enableStreamPrefetcher) {
-      Module(new StreamPrefetcher)
+  // Build prefetcher based on configuration
+  // Define all available prefetchers with their enable flags and generators
+  val prefetcherConfigs: Seq[(Boolean, (TLEdgeOut, Parameters) => DataPrefetcher)] = Seq(
+    (enableNextLinePrefetcher,      (e, p) => new NLPrefetcher()(e, p)),
+    (enableVaddrNextLinePrefetcher, (e, p) => new VAddrNLPrefetcher()(e, p)),
+    (enableStridePrefetcher,        (e, p) => new StridePrefetcher()(e, p)),
+    (enableStreamPrefetcher,        (e, p) => new StreamPrefetcher()(e, p))
+  )
+  val enabledPrefetchers = prefetcherConfigs.filter(_._1).map(_._2)
+
+  val prefetcher: DataPrefetcher = if (enablePrefetching) {
+    if (enableIntegratedPrefetcher) {
+      require(enabledPrefetchers.nonEmpty, 
+        "IntegratedPrefetcher requires at least one sub-prefetcher to be enabled")
+      Module(new IntegratedPrefetcher(enabledPrefetchers))
     } else {
-      Module(new NullPrefetcher)
+      require(enabledPrefetchers.size == 1, 
+        s"Without IntegratedPrefetcher, at most one prefetcher should be enabled, but found ${enabledPrefetchers.size}")
+      enabledPrefetchers.headOption match {
+        case Some(gen) => Module(gen(edge, p))
+        case None      => Module(new NullPrefetcher)
+      }
     }
-   } else {
+  } else {
     Module(new NullPrefetcher)
-   }
+  }
 
   io.lsu.prefetch_translation_req <> prefetcher.io.prefetch_translation_req
   prefetcher.io.prefetch_translation_resp <> io.lsu.prefetch_translation_resp

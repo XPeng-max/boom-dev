@@ -18,6 +18,7 @@ import freechips.rocketchip.rocket._
 import boom.v3.common._
 import boom.v3.exu.BrResolutionInfo
 import boom.v3.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, UpdateBrMask}
+import freechips.rocketchip.tile.FType.S
 
 
 // Prefetch type constants for tracking which prefetcher issued the request
@@ -153,7 +154,7 @@ class VAddrNLPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPre
 trait HasL1PrefetcherHelper extends HasL1HellaCacheParameters {
   // region related
   // 每个region为1024B
-  val REGION_SIZE = 1024
+  val REGION_SIZE = 512
   val PAGE_OFFSET = 12
   // region内的块数量 -> 16 个 cache line
   val BIT_VEC_WIDTH = REGION_SIZE / cacheBlockBytes
@@ -169,14 +170,24 @@ trait HasL1PrefetcherHelper extends HasL1HellaCacheParameters {
   val BLK_ADDR_RAW_WIDTH = 10
   val HASH_TAG_WIDTH = VADDR_HASH_WIDTH + BLK_ADDR_RAW_WIDTH
 
+  // address tag
+  val ADDRESS_TAG_WIDTH = 9
+  val SANDBOX_TABLE_SIZE = 512
+
+  // 计算 tag 的实际宽度：地址宽度 - 块偏移 - 索引位
+  val SANDBOX_TAG_WIDTH = coreMaxAddrBits - lgCacheBlockBytes - log2Ceil(SANDBOX_TABLE_SIZE)
+  val SANDBOX_IDX_WIDTH = log2Ceil(SANDBOX_TABLE_SIZE)
+
   // capacity related
   val FILTER_REGION_SIZE = 8
 
-  // prefetch sink related
-  // val SINK_BITS = 2
-  // def SINK_L1 = "b00".U
-  // def SINK_L2 = "b01".U
-  // def SINK_L3 = "b10".U
+
+  def get_paddr_idx_tag(addr: UInt) = {
+    require(addr.getWidth >= paddrBits)
+    val idx = addr(lgCacheBlockBytes + log2Ceil(SANDBOX_TABLE_SIZE) - 1, lgCacheBlockBytes)
+    val tag = addr(addr.getWidth - 1, lgCacheBlockBytes + log2Ceil(SANDBOX_TABLE_SIZE))
+    (idx, tag)
+  }
 
   // vaddr: |       region tag        |  region bits  | block offset |
   def get_region_tag(vaddr: UInt) = {
@@ -502,7 +513,7 @@ trait HasStreamPrefetchHelper extends HasL1PrefetcherHelper {
   //                        |  <---------------------------- depth ---------------------------->
   //                                                                                           | <-- width -- >
   // 流预取深度和宽度
-  val DEPTH_BYTES = 1024
+  val DEPTH_BYTES = 512
   val DEPTH_CACHE_BLOCKS = DEPTH_BYTES / cacheBlockBytes
   val WIDTH_BYTES = 256
   val WIDTH_CACHE_BLOCKS = WIDTH_BYTES / cacheBlockBytes
@@ -886,4 +897,190 @@ class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut)
       cnt  := cnt - 1.U
     }
   }
+}
+
+class PrefetchBundle(implicit p: Parameters) extends BoomBundle {
+  val prefetch = new BoomDCacheReq
+  val prefetch_type = UInt(2.W) // which prefetcher is sending this req
+}
+
+/* 
+  * Sandbox Table - 单端口预取过滤器 (SyncReadMem 实现)
+  * 1. 记录当前预取请求地址
+  * 2. 如果请求地址已在表中（重复），则过滤掉，不输出
+  * 3. 如果请求地址不在表中，更新表项，允许输出
+  * 4. 使用 SyncReadMem 实现，需要 1 拍读延迟，包含 RAW 旁路逻辑
+ */
+
+class SandboxEntry(implicit p: Parameters) extends BoomBundle with HasL1PrefetcherHelper {
+  val valid = Bool()
+  val tag = UInt(SANDBOX_TAG_WIDTH.W)
+}
+
+class SandboxTable(implicit p: Parameters) extends BoomModule with HasL1PrefetcherHelper {
+  val io = IO(new Bundle {
+    // 单端口预取请求输入
+    val prefetch_in  = Flipped(Decoupled(new BoomDCacheReq))
+    val prefetch_type_in = Input(UInt(2.W))
+    // 预取输出
+    val prefetch      = Decoupled(new BoomDCacheReq)
+    val prefetch_type = Output(UInt(2.W))
+  })
+
+  // ========== 存储结构 (SyncReadMem) ==========
+  // 将 valid 和 tag 合并到一个 entry 中
+
+
+  val entry_mem = SyncReadMem(SANDBOX_TABLE_SIZE, new SandboxEntry)
+
+  // ========== S0: 接收请求，发起读 ==========
+  val s0_valid = io.prefetch_in.valid
+  val s0_idx = io.prefetch_in.bits.addr(lgCacheBlockBytes + SANDBOX_IDX_WIDTH - 1, lgCacheBlockBytes)
+  val s0_addr_tag = io.prefetch_in.bits.addr(coreMaxAddrBits - 1, lgCacheBlockBytes + SANDBOX_IDX_WIDTH)
+  val s0_can_accept = Wire(Bool())
+
+  // 发起读请求（只有当 S0 可以接收时才读）
+  val s0_read_en = s0_valid && s0_can_accept
+  val s0_read_entry = entry_mem.read(s0_idx, s0_read_en)
+
+  // ========== S1: 比较判断 ==========
+  val s1_valid = RegInit(false.B)
+  val s1_idx = Reg(UInt(SANDBOX_IDX_WIDTH.W))
+  val s1_addr_tag = Reg(UInt(SANDBOX_TAG_WIDTH.W))
+  val s1_bits = Reg(new BoomDCacheReq)
+  val s1_type = Reg(UInt(2.W))
+
+  // ========== RAW 冒险旁路 ==========
+  // 记录上一拍写入的信息，用于旁路
+  val bypass_valid = RegInit(false.B)
+  val bypass_idx = Reg(UInt(SANDBOX_IDX_WIDTH.W))
+  val bypass_entry = Reg(new SandboxEntry)
+
+  // 旁路命中：当前 S1 的地址与上一拍写入的地址相同
+  val bypass_hit = bypass_valid && (s1_idx === bypass_idx)
+
+  // 最终的 entry（考虑旁路）
+  val s1_final_entry = Mux(bypass_hit, bypass_entry, s0_read_entry)
+
+  // 表命中判断
+  val s1_table_hit = s1_valid && s1_final_entry.valid && (s1_final_entry.tag === s1_addr_tag)
+
+  // S0 -> S1 流水线推进
+  when (s0_read_en) {
+    s1_valid := true.B
+    s1_idx := s0_idx
+    s1_addr_tag := s0_addr_tag
+    s1_bits := io.prefetch_in.bits
+    s1_type := io.prefetch_type_in
+  } .elsewhen (io.prefetch.fire || (s1_valid && s1_table_hit)) {
+    // S1 完成（发出或被过滤），清空 S1
+    s1_valid := false.B
+  }
+
+  // ========== 输出逻辑 ==========
+  io.prefetch.valid := s1_valid && !s1_table_hit
+  io.prefetch.bits  := s1_bits
+  io.prefetch_type  := s1_type
+
+  // ========== Ready 信号 ==========
+  // S0 可以接收新请求的条件：S1 为空，或 S1 本周期会完成
+  val s1_will_complete = s1_table_hit || io.prefetch.fire
+  s0_can_accept := !s1_valid || s1_will_complete
+  io.prefetch_in.ready := s0_can_accept
+
+  // ========== 写入逻辑 ==========
+  val write_entry = Wire(new SandboxEntry)
+  write_entry.valid := true.B
+  write_entry.tag := s1_addr_tag
+
+  when (io.prefetch.fire) {
+    // 写入 entry_mem
+    entry_mem.write(s1_idx, write_entry)
+
+    // 更新旁路寄存器
+    bypass_valid := true.B
+    bypass_idx := s1_idx
+    bypass_entry := write_entry
+  } .otherwise {
+    bypass_valid := false.B
+  }
+}
+
+/**
+  * Integrated Prefetcher with configurable sub-prefetchers
+  * @param prefetcherGens A sequence of generator functions that create DataPrefetcher instances
+  * 
+  * 组合式预取器:
+  * 1. 实例化所有预取器
+  * 2. 使用轮询仲裁器在预取器输出中选择
+  * 3. 通过 SandboxTable 过滤输出以避免冗余预取请求
+  * 
+  * 使用示例:
+  *   val integratedPrefetcher = Module(new IntegratedPrefetcher(Seq(
+  *    (e, p) => new StridePrefetcher()(e, p),
+  *    (e, p) => new StreamPrefetcher()(e, p),
+  *   )))
+  */
+class IntegratedPrefetcher(
+  prefetcherGens: Seq[(TLEdgeOut, Parameters) => DataPrefetcher] = Seq(
+    (e, p) => new StridePrefetcher()(e, p),
+    (e, p) => new StreamPrefetcher()(e, p)
+  )
+)(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetcher with HasL1PrefetcherHelper {
+  
+  require(prefetcherGens.nonEmpty, "At least one sub-prefetcher must be provided")
+  
+  // Instantiate all sub-prefetchers
+  val subPrefetchers = prefetcherGens.map(gen => Module(gen(edge, p)))
+  
+  // 输入：共享输入
+  subPrefetchers.foreach { pf =>
+    pf.io.req_val := io.req_val
+    pf.io.req_pc := io.req_pc
+    pf.io.req_addr := io.req_addr
+    pf.io.req_vaddr := io.req_vaddr
+    pf.io.req_coh := io.req_coh
+    pf.io.req_miss := io.req_miss
+    pf.io.req_pfHit := io.req_pfHit
+    pf.io.mshr_avail := io.mshr_avail
+    
+    // Translation interfaces are not used in sub-prefetchers (handled at integrated level if needed)
+    pf.io.prefetch_translation_resp.valid := false.B
+    pf.io.prefetch_translation_resp.bits := DontCare
+  }
+  
+  // 输出控制：请求过滤
+  class ArbiterBundle extends Bundle {
+    val req = new BoomDCacheReq
+    val prefetch_type = UInt(2.W)
+  }
+  
+  // Round-Robin 仲裁器公平选择各个预取器的输出
+  val arbiter = Module(new RRArbiter(new ArbiterBundle, subPrefetchers.length))
+  
+  // 连接子预取器到仲裁器输入
+  for (i <- 0 until subPrefetchers.length) {
+    arbiter.io.in(i).valid := subPrefetchers(i).io.prefetch.valid
+    arbiter.io.in(i).bits.req := subPrefetchers(i).io.prefetch.bits
+    arbiter.io.in(i).bits.prefetch_type := subPrefetchers(i).io.prefetch_type
+    subPrefetchers(i).io.prefetch.ready := arbiter.io.in(i).ready
+  }
+  
+  // Sandbox Table for filtering redundant prefetch requests
+  val sandboxTable = Module(new SandboxTable)
+  
+  // 连接仲裁器输出到Sandbox Table输入
+  sandboxTable.io.prefetch_in.valid := arbiter.io.out.valid
+  sandboxTable.io.prefetch_in.bits := arbiter.io.out.bits.req
+  sandboxTable.io.prefetch_type_in := arbiter.io.out.bits.prefetch_type
+  arbiter.io.out.ready := sandboxTable.io.prefetch_in.ready
+  
+  // 连接 Sandbox Table 输出到集成预取器输出
+  io.prefetch <> sandboxTable.io.prefetch
+  io.prefetch_type := sandboxTable.io.prefetch_type
+  
+  // 暂时不支持跨页预取翻译请求
+  io.prefetch_translation_req.valid := false.B
+  io.prefetch_translation_req.bits.translation_vaddr := DontCare
+  io.prefetch_translation_resp.ready := false.B
 }
