@@ -31,7 +31,7 @@ class BoomDCacheReqInternal(implicit p: Parameters) extends BoomDCacheReq()(p)
   // Used in the MSHRs
   val sdq_id    = UInt(log2Ceil(cfg.nSDQ).W)
   override val vaddr = UInt(coreMaxAddrBits.W)
-  val prefetch_info = UInt(1.W)
+  val prefetch_info = UInt(3.W)
 }
 
 

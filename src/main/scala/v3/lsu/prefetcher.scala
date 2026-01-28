@@ -23,13 +23,14 @@ import freechips.rocketchip.tile.FType.S
 
 // Prefetch type constants for tracking which prefetcher issued the request
 object PrefetchType {
-  val NULL_PREFETCH   = 0.U(2.W)  // Not a prefetch or unknown source
-  val NL_PREFETCH     = 1.U(2.W)  // Next-line prefetcher
-  val STRIDE_PREFETCH = 2.U(2.W)  // Stride prefetcher
-  val STREAM_PREFETCH = 3.U(2.W)  // Stream prefetcher
+  val NULL_PREFETCH   = 0.U(3.W)  // Not a prefetch or unknown source
+  val NL_PREFETCH     = 1.U(3.W)  // Next-line prefetcher
+  val STRIDE_PREFETCH = 2.U(3.W)  // Stride prefetcher
+  val STREAM_PREFETCH = 3.U(3.W)  // Stream prefetcher
 }
 
-abstract class DataPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
+abstract class DataPrefetcher(num_prefetchers: Int = 1)(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
+  with HasL1PrefetcherHelper
 {
   val io = IO(new Bundle {
     val mshr_avail = Input(Bool())
@@ -39,15 +40,20 @@ abstract class DataPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends B
     val req_coh    = Input(new ClientMetadata)
     val req_pc     = Input(UInt(coreMaxAddrBits.W))
     val req_miss   = Input(Bool())
-    val req_pfHit  = Input(UInt(2.W)) // 0: no pf hit, 1: nl pf hit, 2: stride pf hit, 3: stream pf hit
+    val req_pfHit  = Input(UInt(3.W)) // 0: no pf hit, 1: nl pf hit, 2: stride pf hit, 3: stream pf hit
+
+    val id         = Input(UInt(3.W))
 
     val prefetch   = Decoupled(new BoomDCacheReq)
     // Prefetch type for tracking which prefetcher issued this request
-    val prefetch_type = Output(UInt(2.W))
+    val prefetch_type = Output(UInt(3.W))
 
     // TLB翻译接口
     val prefetch_translation_req = new DecoupledIO(new BoomDCacheTranslationReq)
     val prefetch_translation_resp = Flipped(new DecoupledIO(new BoomDCacheTranslationResp))
+
+    // Allocation结果
+    val allocation_resp = Flipped(new Valid(new AllocationResponseBundle(num_prefetchers)))
   })
 }
 
@@ -74,6 +80,7 @@ class NLPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetch
   val req_valid = RegInit(false.B)
   val req_addr  = Reg(UInt(coreMaxAddrBits.W))
   val req_cmd   = Reg(UInt(M_SZ.W))
+  val req_pc = Reg(UInt(coreMaxAddrBits.W))
 
   val mshr_req_addr = io.req_addr + cacheBlockBytes.U
   val cacheable = edge.manager.supportsAcquireBSafe(mshr_req_addr, lgCacheBlockBytes.U)
@@ -81,6 +88,7 @@ class NLPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetch
     req_valid := true.B
     req_addr  := mshr_req_addr
     req_cmd   := Mux(ClientStates.hasWritePermission(io.req_coh.state), M_PFW, M_PFR)
+    req_pc := io.req_pc
   } .elsewhen (io.prefetch.fire) {
     req_valid := false.B
   }
@@ -90,8 +98,9 @@ class NLPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetch
   io.prefetch.bits.addr        := req_addr
   io.prefetch.bits.uop         := NullMicroOp
   io.prefetch.bits.uop.mem_cmd := req_cmd
+  io.prefetch.bits.uop.debug_pc := req_pc
   io.prefetch.bits.data        := DontCare
-  io.prefetch_type             := PrefetchType.NL_PREFETCH
+  io.prefetch_type             := io.id
   io.prefetch_translation_req.valid := false.B
   io.prefetch_translation_req.bits.translation_vaddr := DontCare
   io.prefetch_translation_resp.ready := false.B
@@ -147,14 +156,14 @@ class VAddrNLPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPre
   io.prefetch.bits.data        := DontCare
   io.prefetch.bits.vaddr       := req_vaddr  // 保留原始虚拟地址
   io.prefetch.bits.is_hella    := false.B
-  io.prefetch_type             := PrefetchType.NL_PREFETCH
+  io.prefetch_type             := io.id
 }
 
 
 trait HasL1PrefetcherHelper extends HasL1HellaCacheParameters {
   // region related
   // 每个region为1024B
-  val REGION_SIZE = 512
+  val REGION_SIZE = 1024
   val PAGE_OFFSET = 12
   // region内的块数量 -> 16 个 cache line
   val BIT_VEC_WIDTH = REGION_SIZE / cacheBlockBytes
@@ -169,25 +178,6 @@ trait HasL1PrefetcherHelper extends HasL1HellaCacheParameters {
   val VADDR_HASH_WIDTH = 5
   val BLK_ADDR_RAW_WIDTH = 10
   val HASH_TAG_WIDTH = VADDR_HASH_WIDTH + BLK_ADDR_RAW_WIDTH
-
-  // address tag
-  val ADDRESS_TAG_WIDTH = 9
-  val SANDBOX_TABLE_SIZE = 512
-
-  // 计算 tag 的实际宽度：地址宽度 - 块偏移 - 索引位
-  val SANDBOX_TAG_WIDTH = coreMaxAddrBits - lgCacheBlockBytes - log2Ceil(SANDBOX_TABLE_SIZE)
-  val SANDBOX_IDX_WIDTH = log2Ceil(SANDBOX_TABLE_SIZE)
-
-  // capacity related
-  val FILTER_REGION_SIZE = 8
-
-
-  def get_paddr_idx_tag(addr: UInt) = {
-    require(addr.getWidth >= paddrBits)
-    val idx = addr(lgCacheBlockBytes + log2Ceil(SANDBOX_TABLE_SIZE) - 1, lgCacheBlockBytes)
-    val tag = addr(addr.getWidth - 1, lgCacheBlockBytes + log2Ceil(SANDBOX_TABLE_SIZE))
-    (idx, tag)
-  }
 
   // vaddr: |       region tag        |  region bits  | block offset |
   def get_region_tag(vaddr: UInt) = {
@@ -265,7 +255,7 @@ trait HasStridePrefetcherConstants extends HasL1PrefetcherHelper{
   val STRIDE_DEPTH_RATIO = 1 // prefetch depth = stride << STRIDE_DEPTH_RATIO
 
   // detail control
-  val ALWAYS_UPDATE_PRE_VADDR = true
+  val ALWAYS_UPDATE_PRE_VADDR = false
   // NOTE: for now, not support yet.
   val AGGRESIVE_POLICY = false // if true, prefetch degree is greater than 1, 1 otherwise
   val STRIDE_LOOK_AHEAD_BLOCKS = 2 // aggressive degree
@@ -319,6 +309,8 @@ class StrideMetaBundle(implicit p: Parameters) extends BoomBundle with HasStride
     val stride_match = new_stride === stride
     val low_confidence = confidence <= 1.U
     val can_send_pf = stride_valid && stride_match && confidence === MAX_CONF.U
+    printf("[StridePrefetcher] update: pre_vaddr = %x, new_vaddr = %x, new_stride = %x, stride = %x, stride_valid = %d, stride_match = %d, confidence = %d, can_send_pf = %d\n",
+      pre_vaddr, new_vaddr, new_stride, stride, stride_valid, stride_match, confidence, can_send_pf)
 
     when(stride_valid) {
       when(stride_match) {
@@ -363,6 +355,7 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   // declare s1 registers early so they exist during elaboration
   val s1_valid = RegInit(false.B)
   val s1_index = RegInit(0.U(log2Up(STRIDE_ENTRY_NUM).W))
+  val s1_pc = RegInit(0.U(s0_pc.getWidth.W))
   val s1_pc_hash = RegInit(0.U(s0_pc_hash.getWidth.W))
   val s1_vaddr = RegInit(0.U(s0_vaddr.getWidth.W))
   val s1_paddr = RegInit(0.U(s0_paddr.getWidth.W))
@@ -393,6 +386,7 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
     s1_valid := s0_vaddr =/= 0.U
     s1_index := s0_index
     s1_pc_hash := s0_pc_hash
+    s1_pc := s0_pc
     s1_vaddr := s0_vaddr
     s1_paddr := s0_paddr
     s1_hit := s0_hit
@@ -423,12 +417,13 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
       vaddr = s1_vaddr,
       alloc_hash_pc = s1_pc_hash
     )
-    // printf("StridePrefetcher s1_alloc event: array(s1_index = %d) <-  s1_pc_hash = %x, vaddr = %x\n", s1_index, s1_pc_hash, s1_vaddr)
+    printf(p"[StridePrefetcher] ALLOC: pc_hash=0x${Hexadecimal(s1_pc_hash)}, vaddr=0x${Hexadecimal(s1_vaddr)}, idx=${s1_index}\n")
   }.elsewhen(s1_update) {
     val res = array(s1_index).update(s1_vaddr, always_update)
     s1_can_send_pf := res._1
     s1_new_stride := res._2
-    // printf("StridePrefetcher s1_update event: array(s1_index = %d) updated with s1_pc_hash = %x, vaddr = %x, can_send_pf = %d, new_stride = %x\n", s1_index, s1_pc_hash, s1_vaddr, res._1, res._2)
+    printf(p"[StridePrefetcher] UPDATE: pc_hash=0x${Hexadecimal(s1_pc_hash)}, vaddr=0x${Hexadecimal(s1_vaddr)}, idx=${s1_index}, ")
+    printf(p"stride=0x${Hexadecimal(array(s1_index).stride)}, conf=${array(s1_index).confidence}, can_pf=${res._1}\n")
   }
 
   val stride_ratio = STRIDE_DEPTH_RATIO.U
@@ -441,6 +436,7 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s2_pf_vaddr = (s2_vaddr + s2_depth)(vaddrBits - 1, 0)
   val s2_pf_paddr = (s2_paddr + s2_depth)(paddrBits - 1, 0)
   val s2_pf_paddr_valid = s2_valid && samePage(s2_pf_vaddr, s2_vaddr)
+  val s2_pc = RegEnable(s1_pc, s1_valid && s1_can_send_pf)
 
   // TODO: virtual address prefetch request
   /*
@@ -466,14 +462,21 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s3_valid = RegNext(s2_valid && io.prefetch_translation_resp.valid && !io.prefetch_translation_resp.bits.translation_miss)
   */
   val cacheable = edge.manager.supportsAcquireBSafe(s2_pf_paddr, lgCacheBlockBytes.U)
-  io.prefetch.valid := s2_pf_paddr_valid && io.mshr_avail && cacheable
+  io.prefetch.valid := s2_pf_paddr_valid && cacheable
   io.prefetch.bits.addr := s2_pf_paddr
   io.prefetch.bits.uop := NullMicroOp
   io.prefetch.bits.uop.mem_cmd := M_PFR
+  io.prefetch.bits.uop.debug_pc := s2_pc
   io.prefetch.bits.data := DontCare
   io.prefetch.bits.vaddr := s2_pf_vaddr
   io.prefetch.bits.is_hella := false.B
-  io.prefetch_type := PrefetchType.STRIDE_PREFETCH
+  io.prefetch_type := io.id
+
+  // Debug: 预取请求输出
+  when (io.prefetch.fire) {
+    printf(p"[StridePrefetcher] PREFETCH: paddr=0x${Hexadecimal(s2_pf_paddr)}, vaddr=0x${Hexadecimal(s2_pf_vaddr)}, ")
+    printf(p"stride=0x${Hexadecimal(s2_stride)}, depth=0x${Hexadecimal(s2_depth)}, pc=0x${Hexadecimal(s2_pc)}\n")
+  }
 
   io.prefetch_translation_req.valid := false.B
   io.prefetch_translation_req.bits.translation_vaddr := DontCare
@@ -513,7 +516,7 @@ trait HasStreamPrefetchHelper extends HasL1PrefetcherHelper {
   //                        |  <---------------------------- depth ---------------------------->
   //                                                                                           | <-- width -- >
   // 流预取深度和宽度
-  val DEPTH_BYTES = 512
+  val DEPTH_BYTES = 1024
   val DEPTH_CACHE_BLOCKS = DEPTH_BYTES / cacheBlockBytes
   val WIDTH_BYTES = 256
   val WIDTH_CACHE_BLOCKS = WIDTH_BYTES / cacheBlockBytes
@@ -606,12 +609,14 @@ class StreamPrefetchReqBundle(implicit p: Parameters) extends BoomBundle with Ha
   val addr = UInt(coreMaxAddrBits.W)
   val cnt  = UInt((log2Up(WIDTH_CACHE_BLOCKS) + 1).W)
   val decr_mode = Bool()
+  val pc = UInt(coreMaxAddrBits.W)
 
-  def getStreamPrefetchReqBundle(addr: UInt, width: Int, decr_mode: Bool): StreamPrefetchReqBundle = {
+  def getStreamPrefetchReqBundle(addr: UInt, width: Int, decr_mode: Bool, pc: UInt): StreamPrefetchReqBundle = {
     val bundle = Wire(new StreamPrefetchReqBundle)
     bundle.addr := addr
     bundle.cnt := width.U
     bundle.decr_mode := decr_mode
+    bundle.pc := pc
     bundle
   }
 }
@@ -754,6 +759,8 @@ class StreamPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
       alloc_decr_mode = RegEnable(s0_plus_one_hit, s0_valid)
       // alloc_full_vaddr = RegEnable(s0_vaddr, s0_valid)
     )
+    printf(p"[StreamPrefetcher] ALLOC: region_tag=0x${Hexadecimal(s1_region_tag)}, region_bits=${s1_region_bits}, idx=${s1_index}, ")
+    printf(p"active=${s1_plus_one_hit || s1_minus_one_hit}, plus1_hit=${s1_plus_one_hit}, minus1_hit=${s1_minus_one_hit}\n")
   }.elsewhen(s1_update) {
     // update a existing entry
     assert(array(s1_index).cnt =/= 0.U || valids(s1_index), "entry should have been allocated before")
@@ -761,6 +768,8 @@ class StreamPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
       update_bit_vec = UIntToOH(s1_region_bits),
       update_active = s1_plus_one_hit || s1_minus_one_hit
     )
+    printf(p"[StreamPrefetcher] UPDATE: region_tag=0x${Hexadecimal(s1_region_tag)}, region_bits=${s1_region_bits}, idx=${s1_index}, ")
+    printf(p"bitvec=0x${Hexadecimal(array(s1_index).bit_vec)}, cnt=${array(s1_index).cnt}, active=${array(s1_index).active}, can_pf=${s1_can_send_pf}\n")
   }
 
   // s2: trigger prefetch if hit active bit vector, compute meta of prefetch req
@@ -792,8 +801,15 @@ class StreamPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s2_pf_req_bits = (new StreamPrefetchReqBundle).getStreamPrefetchReqBundle(
     addr = s2_pf_paddr,
     width = WIDTH_CACHE_BLOCKS,
-    decr_mode = s2_decr_mode
+    decr_mode = s2_decr_mode,
+    pc = s2_pc
   )
+
+  // Debug: 预取请求触发
+  when (s2_pf_req_valid) {
+    printf(p"[StreamPrefetcher] TRIGGER: paddr=0x${Hexadecimal(s2_pf_paddr)}, vaddr=0x${Hexadecimal(s2_pf_vaddr)}, ")
+    printf(p"region_tag=0x${Hexadecimal(s2_region_tag)}, active=${s2_active}, decr_mode=${s2_decr_mode}, width=${WIDTH_CACHE_BLOCKS.U}\n")
+  }
 
 
   // s3: send the l1 prefetch req out
@@ -801,7 +817,7 @@ class StreamPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   stream_engine.io.l1_prefetch_req.valid := s2_pf_req_valid
   stream_engine.io.l1_prefetch_req.bits := s2_pf_req_bits
   io.prefetch <> stream_engine.io.prefetch
-  io.prefetch_type := PrefetchType.STREAM_PREFETCH
+  io.prefetch_type := io.id
   io.prefetch_translation_req.valid := false.B
   io.prefetch_translation_req.bits.translation_vaddr := DontCare
   io.prefetch_translation_resp.ready := false.B
@@ -837,6 +853,7 @@ class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut)
   val cur_addr   = Reg(UInt(paddrBits.W))
   val cnt    = Reg(UInt(log2Up(WIDTH_CACHE_BLOCKS + 1).W))
   val decr_mode  = Reg(Bool())
+  val cur_pc = Reg(UInt(coreMaxAddrBits.W))
 
   // 下一个 cache line 地址
   val next_addr = Mux(
@@ -860,6 +877,7 @@ class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut)
     cur_addr  := fifo.io.deq.bits.addr
     cnt       := fifo.io.deq.bits.cnt
     decr_mode := fifo.io.deq.bits.decr_mode
+    cur_pc := fifo.io.deq.bits.pc
     valid     := true.B
   }
 
@@ -871,6 +889,7 @@ class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut)
   io.prefetch.bits.addr := cur_addr
   io.prefetch.bits.uop  := NullMicroOp
   io.prefetch.bits.uop.mem_cmd := M_PFR
+  io.prefetch.bits.uop.debug_pc := cur_pc
   io.prefetch.bits.data := DontCare
   io.prefetch.bits.is_hella := false.B
   io.prefetch.bits.vaddr := DontCare // not used in L1 prefetcher
@@ -879,11 +898,15 @@ class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut)
   // 5. fire 时推进 stream
   // ------------------------------------------------------------------
   when (io.prefetch.fire) {
+    // Debug: 预取请求发送
+    printf(p"[StreamPrefetchEngine] PREFETCH: addr=0x${Hexadecimal(cur_addr)}, cnt=${cnt}, decr_mode=${decr_mode}, last=${last_fire}\n")
+    
     when (last_fire) {
       // 当前这拍发完就结束 stream
       when (fifo.io.deq.valid) {
         // 还能接下一个 stream
         cur_addr  := fifo.io.deq.bits.addr
+        cur_pc    := fifo.io.deq.bits.pc
         cnt   := fifo.io.deq.bits.cnt
         decr_mode := fifo.io.deq.bits.decr_mode
         valid    := true.B
@@ -901,132 +924,39 @@ class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut)
 
 class PrefetchBundle(implicit p: Parameters) extends BoomBundle {
   val prefetch = new BoomDCacheReq
-  val prefetch_type = UInt(2.W) // which prefetcher is sending this req
+  val prefetch_type = UInt(3.W) // which prefetcher is sending this req
 }
 
-/* 
-  * Sandbox Table - 单端口预取过滤器 (SyncReadMem 实现)
-  * 1. 记录当前预取请求地址
-  * 2. 如果请求地址已在表中（重复），则过滤掉，不输出
-  * 3. 如果请求地址不在表中，更新表项，允许输出
-  * 4. 使用 SyncReadMem 实现，需要 1 拍读延迟，包含 RAW 旁路逻辑
- */
-
-class SandboxEntry(implicit p: Parameters) extends BoomBundle with HasL1PrefetcherHelper {
-  val valid = Bool()
-  val tag = UInt(SANDBOX_TAG_WIDTH.W)
-}
-
-class SandboxTable(implicit p: Parameters) extends BoomModule with HasL1PrefetcherHelper {
-  val io = IO(new Bundle {
-    // 单端口预取请求输入
-    val prefetch_in  = Flipped(Decoupled(new BoomDCacheReq))
-    val prefetch_type_in = Input(UInt(2.W))
-    // 预取输出
-    val prefetch      = Decoupled(new BoomDCacheReq)
-    val prefetch_type = Output(UInt(2.W))
-  })
-
-  // ========== 存储结构 (SyncReadMem) ==========
-  // 将 valid 和 tag 合并到一个 entry 中
-
-
-  val entry_mem = SyncReadMem(SANDBOX_TABLE_SIZE, new SandboxEntry)
-
-  // ========== S0: 接收请求，发起读 ==========
-  val s0_valid = io.prefetch_in.valid
-  val s0_idx = io.prefetch_in.bits.addr(lgCacheBlockBytes + SANDBOX_IDX_WIDTH - 1, lgCacheBlockBytes)
-  val s0_addr_tag = io.prefetch_in.bits.addr(coreMaxAddrBits - 1, lgCacheBlockBytes + SANDBOX_IDX_WIDTH)
-  val s0_can_accept = Wire(Bool())
-
-  // 发起读请求（只有当 S0 可以接收时才读）
-  val s0_read_en = s0_valid && s0_can_accept
-  val s0_read_entry = entry_mem.read(s0_idx, s0_read_en)
-
-  // ========== S1: 比较判断 ==========
-  val s1_valid = RegInit(false.B)
-  val s1_idx = Reg(UInt(SANDBOX_IDX_WIDTH.W))
-  val s1_addr_tag = Reg(UInt(SANDBOX_TAG_WIDTH.W))
-  val s1_bits = Reg(new BoomDCacheReq)
-  val s1_type = Reg(UInt(2.W))
-
-  // ========== RAW 冒险旁路 ==========
-  // 记录上一拍写入的信息，用于旁路
-  val bypass_valid = RegInit(false.B)
-  val bypass_idx = Reg(UInt(SANDBOX_IDX_WIDTH.W))
-  val bypass_entry = Reg(new SandboxEntry)
-
-  // 旁路命中：当前 S1 的地址与上一拍写入的地址相同
-  val bypass_hit = bypass_valid && (s1_idx === bypass_idx)
-
-  // 最终的 entry（考虑旁路）
-  val s1_final_entry = Mux(bypass_hit, bypass_entry, s0_read_entry)
-
-  // 表命中判断
-  val s1_table_hit = s1_valid && s1_final_entry.valid && (s1_final_entry.tag === s1_addr_tag)
-
-  // S0 -> S1 流水线推进
-  when (s0_read_en) {
-    s1_valid := true.B
-    s1_idx := s0_idx
-    s1_addr_tag := s0_addr_tag
-    s1_bits := io.prefetch_in.bits
-    s1_type := io.prefetch_type_in
-  } .elsewhen (io.prefetch.fire || (s1_valid && s1_table_hit)) {
-    // S1 完成（发出或被过滤），清空 S1
-    s1_valid := false.B
-  }
-
-  // ========== 输出逻辑 ==========
-  io.prefetch.valid := s1_valid && !s1_table_hit
-  io.prefetch.bits  := s1_bits
-  io.prefetch_type  := s1_type
-
-  // ========== Ready 信号 ==========
-  // S0 可以接收新请求的条件：S1 为空，或 S1 本周期会完成
-  val s1_will_complete = s1_table_hit || io.prefetch.fire
-  s0_can_accept := !s1_valid || s1_will_complete
-  io.prefetch_in.ready := s0_can_accept
-
-  // ========== 写入逻辑 ==========
-  val write_entry = Wire(new SandboxEntry)
-  write_entry.valid := true.B
-  write_entry.tag := s1_addr_tag
-
-  when (io.prefetch.fire) {
-    // 写入 entry_mem
-    entry_mem.write(s1_idx, write_entry)
-
-    // 更新旁路寄存器
-    bypass_valid := true.B
-    bypass_idx := s1_idx
-    bypass_entry := write_entry
-  } .otherwise {
-    bypass_valid := false.B
-  }
-}
 
 /**
   * Integrated Prefetcher with configurable sub-prefetchers
   * @param prefetcherGens A sequence of generator functions that create DataPrefetcher instances
+  * @param filterGen A generator function that creates a PrefetchFilter instance
   * 
   * 组合式预取器:
   * 1. 实例化所有预取器
   * 2. 使用轮询仲裁器在预取器输出中选择
-  * 3. 通过 SandboxTable 过滤输出以避免冗余预取请求
+  * 3. 通过 PrefetchFilter 过滤输出以避免冗余预取请求
   * 
   * 使用示例:
   *   val integratedPrefetcher = Module(new IntegratedPrefetcher(Seq(
   *    (e, p) => new StridePrefetcher()(e, p),
   *    (e, p) => new StreamPrefetcher()(e, p),
   *   )))
+  *   
+  *   // 使用自定义过滤器
+  *   val integratedPrefetcher = Module(new IntegratedPrefetcher(
+  *     prefetcherGens = Seq(...),
+  *     filterGen = p => new NullPrefetchFilter()(p)  // 不过滤
+  *   ))
   */
 class IntegratedPrefetcher(
   prefetcherGens: Seq[(TLEdgeOut, Parameters) => DataPrefetcher] = Seq(
     (e, p) => new StridePrefetcher()(e, p),
     (e, p) => new StreamPrefetcher()(e, p)
-  )
-)(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetcher with HasL1PrefetcherHelper {
+  ),
+  filterGen: Parameters => PrefetchFilter = p => new BitVecPrefetchFilter()(p)
+)(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetcher(prefetcherGens.length) with HasL1PrefetcherHelper {
   
   require(prefetcherGens.nonEmpty, "At least one sub-prefetcher must be provided")
   
@@ -1034,8 +964,8 @@ class IntegratedPrefetcher(
   val subPrefetchers = prefetcherGens.map(gen => Module(gen(edge, p)))
   
   // 输入：共享输入
-  subPrefetchers.foreach { pf =>
-    pf.io.req_val := io.req_val
+  subPrefetchers.zipWithIndex.foreach { case (pf, i) =>
+    pf.io.req_val := io.req_val && !(io.allocation_resp.valid && io.allocation_resp.bits.prefetch_degree(i) === 0.U)
     pf.io.req_pc := io.req_pc
     pf.io.req_addr := io.req_addr
     pf.io.req_vaddr := io.req_vaddr
@@ -1043,8 +973,13 @@ class IntegratedPrefetcher(
     pf.io.req_miss := io.req_miss
     pf.io.req_pfHit := io.req_pfHit
     pf.io.mshr_avail := io.mshr_avail
+    pf.io.id := (i + 1).U
+    pf.io.allocation_resp.valid := io.allocation_resp.valid
+    pf.io.allocation_resp.bits.prefetch_degree(0) := io.allocation_resp.bits.prefetch_degree(i)
     
     // Translation interfaces are not used in sub-prefetchers (handled at integrated level if needed)
+    pf.io.prefetch_translation_req.ready := false.B
+    pf.io.prefetch_translation_req.bits := DontCare
     pf.io.prefetch_translation_resp.valid := false.B
     pf.io.prefetch_translation_resp.bits := DontCare
   }
@@ -1052,7 +987,7 @@ class IntegratedPrefetcher(
   // 输出控制：请求过滤
   class ArbiterBundle extends Bundle {
     val req = new BoomDCacheReq
-    val prefetch_type = UInt(2.W)
+    val prefetch_type = UInt(3.W)
   }
   
   // Round-Robin 仲裁器公平选择各个预取器的输出
@@ -1066,18 +1001,22 @@ class IntegratedPrefetcher(
     subPrefetchers(i).io.prefetch.ready := arbiter.io.in(i).ready
   }
   
-  // Sandbox Table for filtering redundant prefetch requests
-  val sandboxTable = Module(new SandboxTable)
+  // PrefetchFilter for filtering redundant prefetch requests
+  val prefetchFilter = Module(filterGen(p))
   
-  // 连接仲裁器输出到Sandbox Table输入
-  sandboxTable.io.prefetch_in.valid := arbiter.io.out.valid
-  sandboxTable.io.prefetch_in.bits := arbiter.io.out.bits.req
-  sandboxTable.io.prefetch_type_in := arbiter.io.out.bits.prefetch_type
-  arbiter.io.out.ready := sandboxTable.io.prefetch_in.ready
+  // 连接仲裁器输出到 PrefetchFilter 输入
+  prefetchFilter.io.prefetch_in.valid := arbiter.io.out.valid
+  prefetchFilter.io.prefetch_in.bits := arbiter.io.out.bits.req
+  prefetchFilter.io.prefetch_type_in := arbiter.io.out.bits.prefetch_type
+  // prefetchFilter.io.prefetch_pc_hash_in := arbiter.io.out.bits.pc_hash
+  arbiter.io.out.ready := prefetchFilter.io.prefetch_in.ready
   
-  // 连接 Sandbox Table 输出到集成预取器输出
-  io.prefetch <> sandboxTable.io.prefetch
-  io.prefetch_type := sandboxTable.io.prefetch_type
+  // 连接 PrefetchFilter 输出到集成预取器输出
+  io.prefetch <> prefetchFilter.io.prefetch_out
+  io.prefetch_type := prefetchFilter.io.prefetch_type_out
+  when (io.prefetch.fire) {
+    printf(p"[IntegratedPrefetcher] PREFETCH SENT: paddr=0x${Hexadecimal(io.prefetch.bits.addr)}, type=${io.prefetch_type}\n")
+  }
   
   // 暂时不支持跨页预取翻译请求
   io.prefetch_translation_req.valid := false.B

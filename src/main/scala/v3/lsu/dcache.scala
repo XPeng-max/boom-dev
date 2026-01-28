@@ -28,7 +28,7 @@ import boom.v3.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlde
 //   2 = STRIDE_PREFETCH: Stride prefetcher
 //   3 = STREAM_PREFETCH: Stream prefetcher
 class L1BoomMetaData(implicit p: Parameters) extends L1Metadata()(p) {
-  val prefetch_info = UInt(2.W)
+  val prefetch_info = UInt(3.W)
 }
 
 object L1BoomMetaData {
@@ -605,6 +605,14 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   io.lsu.prefetch_translation_req <> prefetcher.io.prefetch_translation_req
   prefetcher.io.prefetch_translation_resp <> io.lsu.prefetch_translation_resp
+  // for integrated prefetcher, it will dispatch id by itself
+  // for other prefetchers, it is fixed, we don't need to assign a value.
+  prefetcher.io.id  := 1.U
+
+  // Alecto
+  val sandbox_table: SandboxTable = Module(new SandboxTable)
+  val sample_table: SampleTable = Module(new SampleTable(enabledPrefetchers.size))
+  val allocation_table: AllocationTable = Module(new AllocationTable(enabledPrefetchers.size))
 
   // tags
   def onReset = L1BoomMetaData(0.U, ClientMetadata.onReset)
@@ -771,6 +779,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     VecInit(Mux(mshrs.io.replay.fire && isRead(mshrs.io.replay.bits.uop.mem_cmd), 1.U(memWidth.W), 0.U(memWidth.W)).asBools))
 
 
+  // Alecto Sandbox Table
+  sandbox_table.io.req.valid := io.lsu.req.fire || prefetch_fire
+  sandbox_table.io.req.bits.addr := s0_req(0).addr
+  sandbox_table.io.req.bits.pc := s0_req(0).uop.debug_pc
+  sandbox_table.io.prefetch_type := s0_prefetch_type
+
   val s1_req          = RegNext(s0_req)
   for (w <- 0 until memWidth)
     s1_req(w).uop.br_mask := GetNewBrMask(io.lsu.brupdate, s0_req(w).uop)
@@ -803,6 +817,16 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                            wayMap((w: Int) => s1_tag_eq_way(i)(w) && meta(i).io.resp(w).coh.isValid()).asUInt))))
 
   val s1_wb_idx_matches = widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid)
+
+  // Alecto Sample and Allocation Table Search
+  sample_table.io.sample_update.valid := sandbox_table.io.sample_update.valid && !(s1_valid(0) && s1_type === t_lsu && io.lsu.s1_kill(0))
+  sample_table.io.sample_update.bits := sandbox_table.io.sample_update.bits
+  allocation_table.io.allocation_update <> sample_table.io.allocation_update
+  when (s1_valid(0) && s1_type === t_lsu && !io.lsu.s1_kill(0)) {
+    printf(p"[DCache] S1 LSU Access: PC = 0x${Hexadecimal(s1_req(0).uop.debug_pc)}, Addr = 0x${Hexadecimal(s1_addr(0))}, PrefetchType = ${s1_prefetch_type}\n")
+  }
+  allocation_table.io.allocation_req.valid := s1_valid(0) && s1_type === t_lsu && !io.lsu.s1_kill(0)
+  allocation_table.io.allocation_req.bits.pc :=  s1_req(0).uop.debug_pc
 
   val s2_req   = RegNext(s1_req)
   val s2_type  = RegNext(s1_type)
@@ -978,6 +1002,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_train_valid = s2_valid(0) && s2_type === t_lsu && isRead(s2_req(0).uop.mem_cmd) 
   
   // Connect prefetcher training inputs
+  prefetcher.io.allocation_resp <> allocation_table.io.allocation_resp
   prefetcher.io.mshr_avail := mshrs.io.mshr_avail
   prefetcher.io.req_val    := s2_train_valid
   prefetcher.io.req_addr   := s2_req(0).addr
