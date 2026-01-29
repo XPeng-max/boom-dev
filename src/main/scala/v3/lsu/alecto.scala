@@ -37,6 +37,7 @@ trait HasAlectoParameters extends HasL1PrefetcherHelper {
 // ======================= Sandbox Table =========================
 class SandboxTableEntry(implicit p: Parameters) extends BoomBundle with HasAlectoParameters {
     val valid = Bool()
+    val confirmed = Bool()
     val pc_hash = UInt(HASH_TAG_WIDTH.W) // PC标签部分
     val addr_tag = UInt(SANDBOX_TABLE_TAG_BITS.W) // 地址标签部分
     val prefetch_type = UInt(3.W) // 预取类型
@@ -94,6 +95,7 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
 
   val s1_hit = s1_valid && s1_entry.valid && (s1_entry.addr_tag === s1_addr_tag)
   val s1_is_confirmed = s1_hit && (s1_entry.pc_hash === s1_pc_hash)
+  val s1_need_confirmed = s1_is_confirmed && !s1_entry.confirmed
 
 
   // ========== 构造新 entry ==========
@@ -102,6 +104,7 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
   s1_new_entry.pc_hash := s1_pc_hash
   s1_new_entry.addr_tag := s1_addr_tag
   s1_new_entry.prefetch_type := s1_prefetch_type - 1.U
+  s1_new_entry.confirmed := false.B
 
   // ========== 写回逻辑 ==========
   val s1_prefetch_valid = s1_valid && s1_is_prefetch
@@ -125,7 +128,14 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
     // Debug: 需求请求查询sandbox
     when (s1_hit) {
       when (s1_is_confirmed) {
-        printf(p"[SandboxTable] Demand hit CONFIRMED: addr_tag=0x${Hexadecimal(s1_addr_tag)}, pc_hash=0x${Hexadecimal(s1_pc_hash)}, prefetch_type=${s1_entry.prefetch_type}, idx=${s1_idx}\n")
+        s1_new_entry := s1_entry // 保持不变
+        s1_new_entry.confirmed := true.B
+        table.write(s1_idx, s1_new_entry)
+        // 更新旁路寄存器
+        bypass_valid := true.B
+        bypass_idx := s1_idx
+        bypass_entry := s1_new_entry
+        printf(p"[SandboxTable] Demand hit CONFIRMED(need_confirmed = ${s1_need_confirmed}): addr_tag=0x${Hexadecimal(s1_addr_tag)}, pc_hash=0x${Hexadecimal(s1_pc_hash)}, prefetch_type=${s1_entry.prefetch_type}, idx=${s1_idx}\n")
       } .otherwise {
         printf(p"[SandboxTable] Demand hit but PC MISMATCH: addr_tag=0x${Hexadecimal(s1_addr_tag)}, req_pc_hash=0x${Hexadecimal(s1_pc_hash)}, entry_pc_hash=0x${Hexadecimal(s1_entry.pc_hash)}, idx=${s1_idx}\n")
       }
@@ -150,7 +160,7 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
     // 需求请求：命中的需求请求
     s1_sample_update.prefetch_type := s1_entry.prefetch_type
     s1_sample_update.is_prefetch := false.B
-    s1_sample_update.is_confirmed := s1_is_confirmed
+    s1_sample_update.is_confirmed := s1_need_confirmed
   } .otherwise {
     s1_sample_update.prefetch_type := 0.U
     s1_sample_update.is_prefetch := false.B
