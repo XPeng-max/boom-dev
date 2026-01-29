@@ -22,11 +22,10 @@ import boom.v3.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlde
 
 
 // Extension of L1Metadata to include prefetch information
-// prefetch_info encoding (2 bits):
+// prefetch_info encoding (3 bits):
 //   0 = NULL_PREFETCH: Not prefetched or prefetcher unknown
-//   1 = NL_PREFETCH: Next-line prefetcher
-//   2 = STRIDE_PREFETCH: Stride prefetcher
-//   3 = STREAM_PREFETCH: Stream prefetcher
+//   1-7 = Dynamically assigned prefetcher ID (based on enabledPrefetchers array index + 1)
+//         Actual mapping depends on which prefetchers are enabled in configuration
 class L1BoomMetaData(implicit p: Parameters) extends L1Metadata()(p) {
   val prefetch_info = UInt(3.W)
 }

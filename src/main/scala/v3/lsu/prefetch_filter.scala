@@ -25,11 +25,11 @@ import boom.v3.common._
 class PrefetchFilterIO(implicit p: Parameters) extends BoomBundle with HasSandboxFilterParameters {
   // 预取请求输入
   val prefetch_in  = Flipped(Decoupled(new BoomDCacheReq))
-  val prefetch_type_in = Input(UInt(2.W))
+  val prefetch_type_in = Input(UInt(3.W))
   // val refetch_pc_hash_in = Input(UInt(HASH_TAG_WIDTH.W))
   // 预取请求输出
   val prefetch_out = Decoupled(new BoomDCacheReq)
-  val prefetch_type_out = Output(UInt(2.W))
+  val prefetch_type_out = Output(UInt(3.W))
   // val prefetch_pc_hash_out = Output(UInt(HASH_TAG_WIDTH.W))
 }
 
@@ -96,7 +96,7 @@ class SandboxEntry(implicit p: Parameters) extends BoomBundle with HasSandboxFil
   val valid = Bool()
   val tag = UInt(SANDBOX_TAG_WIDTH.W)
   val pc_hash = UInt(HASH_TAG_WIDTH.W)
-  val prefetch_type = UInt(2.W)  // 记录是哪种预取器发出的请求
+  val prefetch_type = UInt(3.W)  // 记录是哪种预取器发出的请求
 }
 /**
   * BitVecPrefetchFilter - 基于区域位向量的预取过滤器

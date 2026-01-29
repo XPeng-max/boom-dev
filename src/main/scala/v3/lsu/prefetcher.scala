@@ -24,9 +24,7 @@ import freechips.rocketchip.tile.FType.S
 // Prefetch type constants for tracking which prefetcher issued the request
 object PrefetchType {
   val NULL_PREFETCH   = 0.U(3.W)  // Not a prefetch or unknown source
-  val NL_PREFETCH     = 1.U(3.W)  // Next-line prefetcher
-  val STRIDE_PREFETCH = 2.U(3.W)  // Stride prefetcher
-  val STREAM_PREFETCH = 3.U(3.W)  // Stream prefetcher
+  // Other prefetch types are dynamically assigned by io.id (1-based index in enabledPrefetchers array)
 }
 
 abstract class DataPrefetcher(num_prefetchers: Int = 1)(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
@@ -347,7 +345,7 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
 
   // s0: hash pc -> cam all entries
   val s0_can_accept = Wire(Bool())
-  val s0_valid = io.req_val && (io.req_miss || io.req_pfHit === PrefetchType.STRIDE_PREFETCH)
+  val s0_valid = io.req_val && (io.req_miss || io.req_pfHit === io.id)
   val s0_vaddr = io.req_vaddr
   val s0_paddr = io.req_addr
   val s0_pc = io.req_pc
@@ -663,7 +661,7 @@ class StreamPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s0_paddr  = io.req_addr
   val s0_vaddr = io.req_vaddr
   val s0_miss  = io.req_miss
-  val s0_pfHit = io.req_pfHit === PrefetchType.STREAM_PREFETCH
+  val s0_pfHit = io.req_pfHit === io.id
   // TODO:训练请求类型: 原则上, Stream Prefetcher对所有需求请求都会训练，但只会对miss和pfHitStream触发预取
   // val s0_miss  = io.train_req.bits.miss
   // val s0_pfHit = io.train_req.bits.pfHitStream
