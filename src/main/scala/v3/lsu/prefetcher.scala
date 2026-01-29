@@ -177,6 +177,11 @@ trait HasL1PrefetcherHelper extends HasL1HellaCacheParameters {
   val BLK_ADDR_RAW_WIDTH = 10
   val HASH_TAG_WIDTH = VADDR_HASH_WIDTH + BLK_ADDR_RAW_WIDTH
 
+  val MAX_DEGREE = 8
+  val MAX_DEPTH = 32
+  val MAX_DEGREE_BITS = log2Ceil(MAX_DEGREE)
+  val MAX_DEPTH_BITS = log2Ceil(MAX_DEPTH)
+
   // vaddr: |       region tag        |  region bits  | block offset |
   def get_region_tag(vaddr: UInt) = {
     require(vaddr.getWidth >= vaddrBits)
@@ -350,6 +355,7 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s0_paddr = io.req_addr
   val s0_pc = io.req_pc
   val s0_pc_hash = pc_hash_tag(s0_pc)
+  val s0_degree = Mux(io.allocation_resp.valid, io.allocation_resp.bits.prefetch_degree(0), 1.U)
   // declare s1 registers early so they exist during elaboration
   val s1_valid = RegInit(false.B)
   val s1_index = RegInit(0.U(log2Up(STRIDE_ENTRY_NUM).W))
@@ -358,6 +364,7 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s1_vaddr = RegInit(0.U(s0_vaddr.getWidth.W))
   val s1_paddr = RegInit(0.U(s0_paddr.getWidth.W))
   val s1_hit = RegInit(false.B)
+  val s1_degree = RegInit(0.U(s0_degree.getWidth.W))
 
   val s0_pc_match_vec = VecInit(array zip valids map { case (e, v) => e.tag_match(v, s0_valid, s0_pc_hash) }).asUInt
 
@@ -388,6 +395,7 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
     s1_vaddr := s0_vaddr
     s1_paddr := s0_paddr
     s1_hit := s0_hit
+    s1_degree := s0_degree
   } .otherwise {
     s1_valid := false.B
   }
@@ -435,6 +443,7 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s2_pf_paddr = (s2_paddr + s2_depth)(paddrBits - 1, 0)
   val s2_pf_paddr_valid = s2_valid && samePage(s2_pf_vaddr, s2_vaddr)
   val s2_pc = RegEnable(s1_pc, s1_valid && s1_can_send_pf)
+  val s2_degree = RegEnable(s1_degree, s1_valid && s1_can_send_pf)
 
   // TODO: virtual address prefetch request
   /*
@@ -459,15 +468,20 @@ class StridePrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   // s3: send vaddr prefetch request
   val s3_valid = RegNext(s2_valid && io.prefetch_translation_resp.valid && !io.prefetch_translation_resp.bits.translation_miss)
   */
-  val cacheable = edge.manager.supportsAcquireBSafe(s2_pf_paddr, lgCacheBlockBytes.U)
-  io.prefetch.valid := s2_pf_paddr_valid && cacheable
-  io.prefetch.bits.addr := s2_pf_paddr
-  io.prefetch.bits.uop := NullMicroOp
-  io.prefetch.bits.uop.mem_cmd := M_PFR
-  io.prefetch.bits.uop.debug_pc := s2_pc
-  io.prefetch.bits.data := DontCare
-  io.prefetch.bits.vaddr := s2_pf_vaddr
-  io.prefetch.bits.is_hella := false.B
+  val stream_req = (new StreamPrefetchReqBundle).getStreamPrefetchReqBundle(s2_pf_paddr, s2_degree, s2_stride, false.B, s2_pc)
+  val stream_prefetch_engine = Module(new StreamPrefetchEngine)
+  stream_prefetch_engine.io.l1_prefetch_req.valid := s2_pf_paddr_valid
+  stream_prefetch_engine.io.l1_prefetch_req.bits := stream_req
+  io.prefetch <> stream_prefetch_engine.io.prefetch
+  // val cacheable = edge.manager.supportsAcquireBSafe(s2_pf_paddr, lgCacheBlockBytes.U)
+  // io.prefetch.valid := s2_pf_paddr_valid && cacheable
+  // io.prefetch.bits.addr := s2_pf_paddr
+  // io.prefetch.bits.uop := NullMicroOp
+  // io.prefetch.bits.uop.mem_cmd := M_PFR
+  // io.prefetch.bits.uop.debug_pc := s2_pc
+  // io.prefetch.bits.data := DontCare
+  // io.prefetch.bits.vaddr := s2_pf_vaddr
+  // io.prefetch.bits.is_hella := false.B
   io.prefetch_type := io.id
 
   // Debug: 预取请求输出
@@ -516,7 +530,7 @@ trait HasStreamPrefetchHelper extends HasL1PrefetcherHelper {
   // 流预取深度和宽度
   val DEPTH_BYTES = 1024
   val DEPTH_CACHE_BLOCKS = DEPTH_BYTES / cacheBlockBytes
-  val WIDTH_BYTES = 256
+  val WIDTH_BYTES = 192
   val WIDTH_CACHE_BLOCKS = WIDTH_BYTES / cacheBlockBytes
 
   // val DEPTH_LOOKAHEAD = 6
@@ -603,17 +617,19 @@ class StreamBitVectorBundle(implicit p: Parameters) extends BoomBundle with HasS
   }
 }
 
-class StreamPrefetchReqBundle(implicit p: Parameters) extends BoomBundle with HasStreamPrefetchHelper {
+class StreamPrefetchReqBundle(implicit p: Parameters) extends BoomBundle with HasStreamPrefetchHelper with HasStridePrefetcherConstants{
   val addr = UInt(coreMaxAddrBits.W)
   val cnt  = UInt((log2Up(WIDTH_CACHE_BLOCKS) + 1).W)
   val decr_mode = Bool()
+  val stride = UInt(STRIDE_BITS.W)
   val pc = UInt(coreMaxAddrBits.W)
 
-  def getStreamPrefetchReqBundle(addr: UInt, width: Int, decr_mode: Bool, pc: UInt): StreamPrefetchReqBundle = {
+  def getStreamPrefetchReqBundle(addr: UInt, width: UInt, stride: UInt, decr_mode: Bool, pc: UInt): StreamPrefetchReqBundle = {
     val bundle = Wire(new StreamPrefetchReqBundle)
     bundle.addr := addr
-    bundle.cnt := width.U
+    bundle.cnt := width
     bundle.decr_mode := decr_mode
+    bundle.stride := stride
     bundle.pc := pc
     bundle
   }
@@ -662,6 +678,7 @@ class StreamPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s0_vaddr = io.req_vaddr
   val s0_miss  = io.req_miss
   val s0_pfHit = io.req_pfHit === io.id
+  val s0_degree = Mux(io.allocation_resp.valid, io.allocation_resp.bits.prefetch_degree(0), 1.U)
   // TODO:训练请求类型: 原则上, Stream Prefetcher对所有需求请求都会训练，但只会对miss和pfHitStream触发预取
   // val s0_miss  = io.train_req.bits.miss
   // val s0_pfHit = io.train_req.bits.pfHitStream
@@ -722,6 +739,7 @@ class StreamPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s1_vaddr = RegEnable(s0_vaddr, s0_valid)
   val s1_miss  = RegEnable(s0_miss, s0_valid)
   val s1_pfHit = RegEnable(s0_pfHit, s0_valid)
+  val s1_degree = RegEnable(s0_degree, s0_valid)
   val s1_plus_one_index = RegEnable(s0_plus_one_index, s0_valid)
   val s1_minus_one_index = RegEnable(s0_minus_one_index, s0_valid)
   val s1_plus_one_hit = if(ENABLE_STRICT_ACTIVE_DETECTION)
@@ -782,6 +800,7 @@ class StreamPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   val s2_pf_decr_vaddr = RegEnable(s1_pf_decr_vaddr, s1_valid)
   val s2_can_send_pf = RegEnable(s1_can_send_pf, s1_valid)
   val s2_can_trigger = RegEnable(s1_can_trigger, s1_valid)
+  val s2_degree = RegEnable(s1_degree, s1_valid)
   // 这里可能存在冒险：s1阶段更新了active位，s2阶段读的时候是最新或老的active位判断？
   // 但应该不会对结果造成太大影响
   val s2_active = array(s2_index).active
@@ -798,7 +817,8 @@ class StreamPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
 
   val s2_pf_req_bits = (new StreamPrefetchReqBundle).getStreamPrefetchReqBundle(
     addr = s2_pf_paddr,
-    width = WIDTH_CACHE_BLOCKS,
+    width = s2_degree + WIDTH_CACHE_BLOCKS.U,
+    stride = cacheBlockBytes.U,
     decr_mode = s2_decr_mode,
     pc = s2_pc
   )
@@ -806,7 +826,7 @@ class StreamPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPref
   // Debug: 预取请求触发
   when (s2_pf_req_valid) {
     printf(p"[StreamPrefetcher] TRIGGER: paddr=0x${Hexadecimal(s2_pf_paddr)}, vaddr=0x${Hexadecimal(s2_pf_vaddr)}, ")
-    printf(p"region_tag=0x${Hexadecimal(s2_region_tag)}, active=${s2_active}, decr_mode=${s2_decr_mode}, width=${WIDTH_CACHE_BLOCKS.U}\n")
+    printf(p"region_tag=0x${Hexadecimal(s2_region_tag)}, active=${s2_active}, decr_mode=${s2_decr_mode}, width=${s2_degree + WIDTH_CACHE_BLOCKS.U}\n")
   }
 
 
@@ -832,7 +852,7 @@ TODO: support flush prefetcher
 */
 }
 
-class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut) extends BoomModule with HasStreamPrefetchHelper {
+class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut) extends BoomModule with HasStreamPrefetchHelper with HasStridePrefetcherConstants {
   val io = IO(new Bundle {
     val l1_prefetch_req = Flipped(Decoupled(new StreamPrefetchReqBundle))
     val prefetch        = Decoupled(new BoomDCacheReq)
@@ -852,12 +872,13 @@ class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut)
   val cnt    = Reg(UInt(log2Up(WIDTH_CACHE_BLOCKS + 1).W))
   val decr_mode  = Reg(Bool())
   val cur_pc = Reg(UInt(coreMaxAddrBits.W))
+  val cur_stride = Reg(UInt(STRIDE_BITS.W))
 
   // 下一个 cache line 地址
   val next_addr = Mux(
     decr_mode,
-    cur_addr - cacheBlockBytes.U,
-    cur_addr + cacheBlockBytes.U
+    cur_addr - cur_stride,
+    cur_addr + cur_stride
   )
 
   // 当前这一次 fire 是否是最后一次
@@ -876,6 +897,7 @@ class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut)
     cnt       := fifo.io.deq.bits.cnt
     decr_mode := fifo.io.deq.bits.decr_mode
     cur_pc := fifo.io.deq.bits.pc
+    cur_stride := fifo.io.deq.bits.stride
     valid     := true.B
   }
 
@@ -907,6 +929,7 @@ class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut)
         cur_pc    := fifo.io.deq.bits.pc
         cnt   := fifo.io.deq.bits.cnt
         decr_mode := fifo.io.deq.bits.decr_mode
+        cur_stride := fifo.io.deq.bits.stride
         valid    := true.B
       }.otherwise {
         // 没有下一个 stream 了

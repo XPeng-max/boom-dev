@@ -23,7 +23,7 @@ trait HasAlectoParameters extends HasL1PrefetcherHelper {
     val SANDBOX_TABLE_TAG_BITS = coreMaxAddrBits - SANDBOX_TABLE_BITS
 
     val SAMPLE_TABLE_SIZE = 64
-    val SAMPLE_TABLE_COUNTER_WIDTH = 8
+    val SAMPLE_TABLE_COUNTER_WIDTH = 6
     val SAMPLE_TABLE_BITS = log2Ceil(SAMPLE_TABLE_SIZE)
     val SAMPLE_TABLE_TAG_BITS = HASH_TAG_WIDTH - SAMPLE_TABLE_BITS
     val SAMPLE_DEMAND_THRESHOLD = 50
@@ -31,7 +31,7 @@ trait HasAlectoParameters extends HasL1PrefetcherHelper {
     val ALLOCATION_TABLE_SIZE = 64
     val ALLOCATION_TABLE_BITS = log2Ceil(ALLOCATION_TABLE_SIZE)
     val ALLOCATION_TABLE_TAG_BITS = HASH_TAG_WIDTH - ALLOCATION_TABLE_BITS
-    val ALLOCATION_DEGREE_WIDTH = 1
+    val ALLOCATION_DEGREE_WIDTH = 3
 }
 
 // ======================= Sandbox Table =========================
@@ -485,10 +485,10 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
 
   // 计算 is_promote 和 is_demote
   val is_promote = VecInit((0 until num_prefetchers).map { i =>
-    s1_update_confirmed(i) >= (s1_update_issued(i) >> 1) + (s1_update_issued(i) >> 2)
+    (s1_update_confirmed(i) >= ((s1_update_issued(i) >> 1) + (s1_update_issued(i) >> 2))) && (s1_update_issued(i) =/= 0.U)
   })
   val is_demote = VecInit((0 until num_prefetchers).map { i =>
-    s1_update_confirmed(i) <= (s1_update_issued(i) >> 2)
+    (s1_update_confirmed(i) <= (s1_update_issued(i) >> 2)) && (s1_update_issued(i) =/= 0.U)
   })
 
   // 构造新 entry
