@@ -100,46 +100,42 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
 
   // ========== 构造新 entry ==========
   val s1_new_entry = Wire(new SandboxTableEntry)
-  s1_new_entry.valid := true.B
-  s1_new_entry.pc_hash := s1_pc_hash
-  s1_new_entry.addr_tag := s1_addr_tag
-  s1_new_entry.prefetch_type := s1_prefetch_type - 1.U
-  s1_new_entry.confirmed := false.B
+  s1_new_entry := s1_entry // 默认保持不变
 
   // ========== 写回逻辑 ==========
   val s1_prefetch_valid = s1_valid && s1_is_prefetch
-  when (s1_prefetch_valid) {
+  val s1_prefetch_alloc = s1_prefetch_valid && !s1_hit
+  val s1_demand_confirmed = s1_valid && !s1_is_prefetch && s1_is_confirmed
+  when (s1_prefetch_alloc) {
     // Debug: 预取请求写入sandbox
     printf(p"[SandboxTable] Prefetch recorded:s1_hit=${s1_hit}, addr_tag=0x${Hexadecimal(s1_addr_tag)}, pc_hash=0x${Hexadecimal(s1_pc_hash)}, prefetch_type=${s1_prefetch_type - 1.U}, idx=${s1_idx}\n")
-    when (s1_hit) {
-      // 不覆盖，丢弃该请求
-      io.kill_prefetch := true.B
-      bypass_valid := false.B
-    }.otherwise {
-      // 新请求，分配
-      table.write(s1_idx, s1_new_entry)
-      // 更新旁路寄存器
-      bypass_valid := true.B
-      bypass_idx := s1_idx
-      bypass_entry := s1_new_entry
-    }
+    // 对于预取且未命中的请求，分配一个新的entry
+    // 对于预取且命中的请求，过滤掉
+    s1_new_entry.valid := true.B
+    s1_new_entry.pc_hash := s1_pc_hash
+    s1_new_entry.addr_tag := s1_addr_tag
+    s1_new_entry.prefetch_type := s1_prefetch_type - 1.U // Alecto在Sandbox Table之后prefetch_type减1，用于进行索引
+    s1_new_entry.confirmed := false.B // 初始时为false
+  } .elsewhen(s1_demand_confirmed) {
+    // Debug: 需求请求查询sandbox
+    // 对于需求请求，如果是命中且未确认过的，进行标记
+    // 如果是命中且已确认过的，则不做任何操作
+    printf(p"[SandboxTable] Demand hit CONFIRMED(need_confirmed = ${s1_need_confirmed}): addr_tag=0x${Hexadecimal(s1_addr_tag)}, pc_hash=0x${Hexadecimal(s1_pc_hash)}, prefetch_type=${s1_entry.prefetch_type}, idx=${s1_idx}\n")
+    s1_new_entry.confirmed := true.B
+  }
+  // ========== 写回逻辑 ==========
+  // 写回只在预取请求时发生（命中丢弃，未命中分配）
+  // 需求请求只在confirm时写回
+  val s1_should_write = s1_prefetch_alloc || s1_demand_confirmed
+
+  when (s1_should_write) {
+    table.write(s1_idx, s1_new_entry)
+    // 更新旁路寄存器
+    bypass_valid := true.B
+    bypass_idx := s1_idx
+    bypass_entry := s1_new_entry
   } .otherwise {
     bypass_valid := false.B
-    // Debug: 需求请求查询sandbox
-    when (s1_hit) {
-      when (s1_is_confirmed) {
-        s1_new_entry := s1_entry // 保持不变
-        s1_new_entry.confirmed := true.B
-        table.write(s1_idx, s1_new_entry)
-        // 更新旁路寄存器
-        bypass_valid := true.B
-        bypass_idx := s1_idx
-        bypass_entry := s1_new_entry
-        printf(p"[SandboxTable] Demand hit CONFIRMED(need_confirmed = ${s1_need_confirmed}): addr_tag=0x${Hexadecimal(s1_addr_tag)}, pc_hash=0x${Hexadecimal(s1_pc_hash)}, prefetch_type=${s1_entry.prefetch_type}, idx=${s1_idx}\n")
-      } .otherwise {
-        printf(p"[SandboxTable] Demand hit but PC MISMATCH: addr_tag=0x${Hexadecimal(s1_addr_tag)}, req_pc_hash=0x${Hexadecimal(s1_pc_hash)}, entry_pc_hash=0x${Hexadecimal(s1_entry.pc_hash)}, idx=${s1_idx}\n")
-      }
-    }
   }
 
   // ========== Sample Update 输出逻辑 ==========
