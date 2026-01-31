@@ -609,9 +609,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   prefetcher.io.id  := 1.U
 
   // Alecto
-  val sandbox_table: SandboxTable = Module(new SandboxTable)
-  val sample_table: SampleTable = Module(new SampleTable(enabledPrefetchers.size))
-  val allocation_table: AllocationTable = Module(new AllocationTable(enabledPrefetchers.size))
+  val sandbox_table: Option[SandboxTable] = if (enableAlecto) Some(Module(new SandboxTable)) else None
+  val sample_table: Option[SampleTable] = if (enableAlecto) Some(Module(new SampleTable(enabledPrefetchers.size))) else None
+  val allocation_table: Option[AllocationTable] = if (enableAlecto) Some(Module(new AllocationTable(enabledPrefetchers.size))) else None
 
   // tags
   def onReset = L1BoomMetaData(0.U, ClientMetadata.onReset)
@@ -779,10 +779,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
 
   // Alecto Sandbox Table
-  sandbox_table.io.req.valid := io.lsu.req.fire || prefetch_fire
-  sandbox_table.io.req.bits.addr := s0_req(0).addr
-  sandbox_table.io.req.bits.pc := s0_req(0).uop.debug_pc
-  sandbox_table.io.prefetch_type := s0_prefetch_type
+  if (enableAlecto) {
+    sandbox_table.get.io.req.valid := io.lsu.req.fire || prefetch_fire
+    sandbox_table.get.io.req.bits.addr := s0_req(0).addr
+    sandbox_table.get.io.req.bits.pc := s0_req(0).uop.debug_pc
+    sandbox_table.get.io.prefetch_type := s0_prefetch_type
+  }
 
   val s1_req          = RegNext(s0_req)
   for (w <- 0 until memWidth)
@@ -818,14 +820,16 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s1_wb_idx_matches = widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid)
 
   // Alecto Sample and Allocation Table Search
-  sample_table.io.sample_update.valid := sandbox_table.io.sample_update.valid && !(s1_valid(0) && s1_type === t_lsu && io.lsu.s1_kill(0))
-  sample_table.io.sample_update.bits := sandbox_table.io.sample_update.bits
-  allocation_table.io.allocation_update <> sample_table.io.allocation_update
-  when (s1_valid(0) && s1_type === t_lsu && !io.lsu.s1_kill(0)) {
-    printf(p"[DCache] S1 LSU Access: PC = 0x${Hexadecimal(s1_req(0).uop.debug_pc)}, Addr = 0x${Hexadecimal(s1_addr(0))}, PrefetchType = ${s1_prefetch_type}\n")
+  if (enableAlecto) {
+    sample_table.get.io.sample_update.valid := sandbox_table.get.io.sample_update.valid && !(s1_valid(0) && s1_type === t_lsu && io.lsu.s1_kill(0))
+    sample_table.get.io.sample_update.bits := sandbox_table.get.io.sample_update.bits
+    allocation_table.get.io.allocation_update <> sample_table.get.io.allocation_update
+    when (s1_valid(0) && s1_type === t_lsu && !io.lsu.s1_kill(0)) {
+      printf(p"[DCache] S1 LSU Access: PC = 0x${Hexadecimal(s1_req(0).uop.debug_pc)}, Addr = 0x${Hexadecimal(s1_addr(0))}, PrefetchType = ${s1_prefetch_type}\n")
+    }
+    allocation_table.get.io.allocation_req.valid := s1_valid(0) && s1_type === t_lsu && !io.lsu.s1_kill(0)
+    allocation_table.get.io.allocation_req.bits.pc :=  s1_req(0).uop.debug_pc
   }
-  allocation_table.io.allocation_req.valid := s1_valid(0) && s1_type === t_lsu && !io.lsu.s1_kill(0)
-  allocation_table.io.allocation_req.bits.pc :=  s1_req(0).uop.debug_pc
 
   val s2_req   = RegNext(s1_req)
   val s2_type  = RegNext(s1_type)
@@ -1001,7 +1005,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_train_valid = s2_valid(0) && s2_type === t_lsu && isRead(s2_req(0).uop.mem_cmd) 
   
   // Connect prefetcher training inputs
-  prefetcher.io.allocation_resp <> allocation_table.io.allocation_resp
+  if (enableAlecto) {
+    prefetcher.io.allocation_resp <> allocation_table.get.io.allocation_resp
+  } else {
+    prefetcher.io.allocation_resp.valid := false.B
+    prefetcher.io.allocation_resp.bits  := DontCare
+  }
   prefetcher.io.mshr_avail := mshrs.io.mshr_avail
   prefetcher.io.req_val    := s2_train_valid
   prefetcher.io.req_addr   := s2_req(0).addr

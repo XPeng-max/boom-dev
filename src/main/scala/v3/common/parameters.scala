@@ -49,6 +49,7 @@ case class BoomCoreParams(
   numFetchBufferEntries: Int = 16,
   enableAgePriorityIssue: Boolean = true,
   enablePrefetching: Boolean = false,
+  enableAlecto: Boolean = false,
   prefetcherParams: PrefetcherParams = PrefetcherParams(),
   enableFastLoadUse: Boolean = true,
   enableCommitMapTable: Boolean = false,
@@ -252,6 +253,7 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   val enableVaddrNextLinePrefetcher = boomParams.prefetcherParams.enableVaddrNextLine
   val enableStridePrefetcher = boomParams.prefetcherParams.enableStride
   val enableStreamPrefetcher = boomParams.prefetcherParams.enableStream
+  val enableAlecto = boomParams.enableAlecto
   val nLBEntries = dcacheParams.nMSHRs
 
   //************************************
