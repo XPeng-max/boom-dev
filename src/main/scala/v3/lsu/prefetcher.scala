@@ -852,6 +852,332 @@ TODO: support flush prefetcher
 */
 }
 
+// =============================================================================
+// CPLX Prefetcher
+// =============================================================================
+
+trait HasCPLXPrefetcherConstants extends HasL1PrefetcherHelper {
+  // stride prefetcher parameters
+  val IP_ENTRY_NUM = 8
+  val CSPT_ENTRY_NUM = 128
+  val SIGNATURE_BITS = log2Up(CSPT_ENTRY_NUM)
+  val STRIDE_BITS = 7
+  val STRIDE_VADDR_BITS = coreMaxAddrBits - lgCacheBlockBytes
+  val CSPT_CONF_BITS = 2
+  val MAX_CONF = (1 << CSPT_CONF_BITS) - 1
+
+  val PC_HASH_BITS = 16
+
+  val STRIDE_DEPTH_RATIO = 2 // prefetch depth = stride << STRIDE_DEPTH_RATIO
+
+  val ALWAYS_UPDATE_PRE_VADDR = true // always update pre_vaddr even stride is invalid
+}
+
+/*
+*
+* CPLXPrefetcher IP Table
+* 全相联结构, 根据PC的hash值进行索引和匹配
+* 需求请求到达时，查询IP表，若命中
+* 1. 查询并计算当前stride(s0)
+* 2. 根据当前signature查询CSPT表项(s1)
+* 3. CSPT会更新IP表的signature(s2)
+* 若未命中：
+* 1. 分配IP表项，初始化signature，pre_vaddr
+*/
+
+class IPMetaBundle(implicit p: Parameters) extends BoomBundle with HasCPLXPrefetcherConstants {
+  val pre_vaddr = UInt(STRIDE_VADDR_BITS.W)
+  val signature = UInt(SIGNATURE_BITS.W)
+  val hash_pc = UInt(HASH_TAG_WIDTH.W)
+
+ def reset(index: Int) = {
+    pre_vaddr := 0.U
+    signature := 0.U
+    hash_pc := index.U
+  }
+
+  def tag_match(valid1: Bool, valid2: Bool, new_hash_pc: UInt): Bool = {
+    valid1 && valid2 && hash_pc === new_hash_pc
+  }
+
+  def alloc(vaddr: UInt, alloc_hash_pc: UInt) = {
+    pre_vaddr := vaddr(STRIDE_VADDR_BITS - 1, 0)
+    hash_pc := alloc_hash_pc
+    signature := 0.U
+  }
+
+  def update(vaddr: UInt, new_signature: UInt) = {
+    pre_vaddr := vaddr(STRIDE_VADDR_BITS - 1, 0)
+    signature := new_signature
+  }
+}
+
+/*
+参考champsim源码
+// update constant stride(CS) confidence
+trackers_l1[cpu][index].conf = update_conf(stride, trackers_l1[cpu][index].last_stride, trackers_l1[cpu][index].conf);
+
+// update CS only if confidence is zero
+if(trackers_l1[cpu][index].conf == 0)                      
+    trackers_l1[cpu][index].last_stride = stride;
+
+last_signature = trackers_l1[cpu][index].signature;
+// update complex stride(CPLX) confidence
+DPT_l1[cpu][last_signature].conf = update_conf(stride, DPT_l1[cpu][last_signature].delta, DPT_l1[cpu][last_signature].conf);
+
+// update CPLX only if confidence is zero
+if(DPT_l1[cpu][last_signature].conf == 0)
+    DPT_l1[cpu][last_signature].delta = stride;
+
+// calculate and update new signature in IP table
+signature = update_sig_l1(last_signature, stride);
+trackers_l1[cpu][index].signature = signature;
+
+* 需求请求到达时，查询IP表，若命中
+* 1. 查询IP Table，获得signature和当前stride信息(s0)
+* 2. 根据当前signature查询CSPT表项(s1)
+* 3.1(s2) 若命中CSPT表，查看stride是否匹配，如果匹配，更新confidence并判断是否能产生预取，计算新的signature，输出预取请求
+* 3.2(s2) 若未命中CSPT表，分配CSPT表项，设置stride为当前stride，confidence为0，计算新的signature
+* 1. 分配IP表项，初始化signature，pre_vaddr，
+*/
+class CPSTMetaBundle(implicit p: Parameters) extends BoomBundle with HasCPLXPrefetcherConstants
+{
+  val valid = Bool()
+  val stride = UInt(STRIDE_BITS.W)
+  val confidence = UInt(CSPT_CONF_BITS.W)
+  def reset(index: Int) = {
+    valid := false.B
+    stride := 0.U
+    confidence := 0.U
+  }
+}
+
+
+class CPLXPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetcher with HasCPLXPrefetcherConstants
+{
+  val CPLX_DEBUG = true.B
+  val ip_table = Reg(Vec(IP_ENTRY_NUM, new IPMetaBundle))
+  val valids = RegInit(VecInit(Seq.fill(IP_ENTRY_NUM)(false.B)))
+  val cspt_table = Seq.fill(2) {SyncReadMem(CSPT_ENTRY_NUM, new CPSTMetaBundle)}
+
+  def reset_array(i: Int): Unit = {
+    valids(i) := false.B
+    //only need to rest control signals for firendly area
+    // array(i).reset(i)
+  }
+
+  val replacement = ReplacementPolicy.fromString("plru", IP_ENTRY_NUM)
+
+  // s0: hash pc -> cam all entries
+  val s0_valid = io.req_val
+  // Use block address for internal storage and calculation
+  val s0_vaddr = (io.req_vaddr >> lgCacheBlockBytes).asUInt(STRIDE_VADDR_BITS - 1, 0)
+  val s0_paddr = (io.req_addr >> lgCacheBlockBytes).asUInt(STRIDE_VADDR_BITS - 1, 0)
+  val s0_pc = io.req_pc
+  val s0_pc_hash = pc_hash_tag(s0_pc)
+  // val s0_degree = Mux(io.allocation_resp.valid, io.allocation_resp.bits.prefetch_degree(0), 1.U)
+  // declare s1 registers early so they exist during elaboration
+  val s1_valid = RegInit(false.B)
+  val s1_index = RegInit(0.U(log2Up(IP_ENTRY_NUM).W))
+  val s1_pc = RegInit(0.U(s0_pc.getWidth.W))
+  val s1_pc_hash = RegInit(0.U(s0_pc_hash.getWidth.W))
+  val s1_vaddr = RegInit(0.U(s0_vaddr.getWidth.W))
+  val s1_paddr = RegInit(0.U(s0_paddr.getWidth.W))
+  val s1_hit = RegInit(false.B)
+  // val s1_degree = RegInit(0.U(s0_degree.getWidth.W))
+
+  val s0_pc_match_vec = VecInit(ip_table zip valids map { case (e, v) => e.tag_match(v, s0_valid, s0_pc_hash) }).asUInt
+
+  val s0_s1_match = s0_valid && s1_valid && s0_pc_hash === s1_pc_hash
+  val s0_hit = s0_s1_match | s0_pc_match_vec.orR
+  val s0_index = Mux(s0_s1_match, s1_index, Mux(s0_hit, OHToUInt(s0_pc_match_vec), replacement.way))
+
+  when(s0_valid) {
+    replacement.access(s0_index)
+    when (CPLX_DEBUG) {
+      printf(p"[CPLXPrefetcher] S0: pc=0x${Hexadecimal(s0_pc)}, pc_hash=0x${Hexadecimal(s0_pc_hash)}, vaddr=0x${Hexadecimal(s0_vaddr)}, paddr=0x${Hexadecimal(s0_paddr)}, hit=${s0_hit}, idx=${s0_index}, match_vec=0x${Hexadecimal(s0_pc_match_vec)}\n")
+    }
+  }
+
+  assert(PopCount(s0_pc_match_vec) <= 1.U)
+
+  // s1: alloc or update
+  // Replace RegNext/RegEnable patterns with explicit RegInit + conditional updates
+  // to avoid forward-reference issues that can produce null chisel nodes.
+
+  when (s0_valid) {
+    s1_valid := s0_vaddr =/= 0.U
+    s1_index := s0_index
+    s1_pc_hash := s0_pc_hash
+    s1_pc := s0_pc
+    s1_vaddr := s0_vaddr
+    s1_paddr := s0_paddr
+    s1_hit := s0_hit
+  } .otherwise {
+    s1_valid := false.B
+  }
+
+  val s1_alloc = s1_valid && !s1_hit
+
+  when(s1_alloc) {
+    valids(s1_index) := true.B
+    ip_table(s1_index).alloc(
+      vaddr = s1_vaddr,
+      alloc_hash_pc = s1_pc_hash
+    )
+    printf(p"[CSPTPrefetcher] IP ALLOC: pc_hash=0x${Hexadecimal(s1_pc_hash)}, vaddr=0x${Hexadecimal(s1_vaddr)}, idx=${s1_index}\n")
+    when (CPLX_DEBUG) {
+      printf(p"[CPLXPrefetcher] S1 ALLOC: pc=0x${Hexadecimal(s1_pc)}, pc_hash=0x${Hexadecimal(s1_pc_hash)}, vaddr=0x${Hexadecimal(s1_vaddr)}, paddr=0x${Hexadecimal(s1_paddr)}, idx=${s1_index}\n")
+    }
+  }
+
+  val s2_valid = RegInit(false.B)
+  val s2_signature: UInt = RegInit(0.U(SIGNATURE_BITS.W))
+  val s2_new_signature: UInt = Wire(UInt(SIGNATURE_BITS.W))
+  val s2_index: UInt = RegInit(0.U(log2Up(IP_ENTRY_NUM).W))
+  val s2_vaddr: UInt = RegInit(0.U(STRIDE_VADDR_BITS.W))
+  val s2_paddr: UInt = RegInit(0.U(STRIDE_VADDR_BITS.W))
+  val s2_stride: UInt = RegInit(0.U(STRIDE_BITS.W))
+  val s2_pc: UInt = RegInit(0.U(s1_pc.getWidth.W))
+
+  // bypass s2 if s1 and s2 are accessing the same entry
+  val s1_signature = Mux(s2_valid && s1_index === s2_index, s2_new_signature, ip_table(s1_index).signature)
+  val s1_pre_vaddr = Mux(s2_valid && s1_index === s2_index, s2_vaddr, ip_table(s1_index).pre_vaddr)
+  val s1_stride = s1_vaddr - Mux(s2_valid && s1_index === s2_index, s2_vaddr, ip_table(s1_index).pre_vaddr)
+  // Optimization: Skip s2 access if stride is 0
+  val s1_signature_valid = s1_valid && s1_hit && (s1_stride =/= 0.U)
+  when (s1_valid) {
+    printf(p"[CPLXPrefetcher] IP ACCESS: pc_hash=0x${Hexadecimal(s1_pc_hash)}, vaddr=0x${Hexadecimal(s1_vaddr)}, idx=${s1_index}, pre_vaddr=0x${Hexadecimal(s1_pre_vaddr)}, stride=0x${Hexadecimal(s1_stride)}, sig=0x${Hexadecimal(s1_signature)}, signature_valid=${s1_signature_valid}\n")
+    when (CPLX_DEBUG) {
+      printf(p"[CPLXPrefetcher] S1: pc=0x${Hexadecimal(s1_pc)}, hit=${s1_hit}, s2_valid=${s2_valid}, s2_idx=${s2_index}, s2_vaddr=0x${Hexadecimal(s2_vaddr)}\n")
+    }
+  }
+
+  val s2_cspt_rdata = cspt_table(0).read(s1_signature, s1_signature_valid)
+  
+  when (s1_valid && s1_signature_valid) {
+    s2_vaddr := s1_vaddr
+    s2_paddr := s1_paddr
+    s2_index := s1_index
+    s2_pc := s1_pc
+    s2_stride := s1_stride
+    s2_signature := s1_signature
+    s2_valid := true.B
+    when (CPLX_DEBUG) {
+      printf(p"[CPLXPrefetcher] S2 PIPE IN: pc=0x${Hexadecimal(s1_pc)}, idx=${s1_index}, vaddr=0x${Hexadecimal(s1_vaddr)}, paddr=0x${Hexadecimal(s1_paddr)}, stride=0x${Hexadecimal(s1_stride)}, sig=0x${Hexadecimal(s1_signature)}\n")
+    }
+  } .otherwise {
+    s2_valid := false.B
+  }
+
+  s2_new_signature := s2_signature // default assignment
+
+  when(s1_valid && s1_hit) {
+    printf(p"[CPLXPrefetcher] IP HIT: pc_hash=0x${Hexadecimal(s1_pc_hash)}, vaddr=0x${Hexadecimal(s1_vaddr)}, idx=${s1_index}, pre_vaddr=0x${Hexadecimal(s1_pre_vaddr)}, stride=0x${Hexadecimal(s1_stride)}, sig=0x${Hexadecimal(s1_signature)}\n")
+  }
+
+  val s2_cspt_alloc = s2_valid && !s2_cspt_rdata.valid
+  val s2_cspt_update = s2_valid && s2_cspt_rdata.valid
+  val new_cspt_entry = Wire(new CPSTMetaBundle)
+  new_cspt_entry := s2_cspt_rdata // default assignment
+
+  when (s2_cspt_alloc) {
+    new_cspt_entry.valid := true.B
+    new_cspt_entry.stride := s2_stride
+    new_cspt_entry.confidence := 0.U
+    printf(p"[CPLXPrefetcher] CSPT ALLOC: pc=0x${Hexadecimal(s2_pc)}, sig=0x${Hexadecimal(s2_signature)}, stride=0x${Hexadecimal(s2_stride)}\n")
+    when (CPLX_DEBUG) {
+      printf(p"[CPLXPrefetcher] S2 CSPT ALLOC: pc=0x${Hexadecimal(s2_pc)}, idx=${s2_index}, vaddr=0x${Hexadecimal(s2_vaddr)}, paddr=0x${Hexadecimal(s2_paddr)}\n")
+    }
+  } .elsewhen (s2_cspt_update) {
+    // 饱和计数confidence更新
+    val conf_inc = Mux(s2_cspt_rdata.confidence === MAX_CONF.U, MAX_CONF.U, s2_cspt_rdata.confidence + 1.U)
+    val conf_dec = Mux(s2_cspt_rdata.confidence === 0.U, 0.U, s2_cspt_rdata.confidence - 1.U)
+    // 根据stride是否匹配进行更新
+    val new_conf = Mux(s2_cspt_rdata.stride === s2_stride, conf_inc, conf_dec)
+
+    new_cspt_entry.valid := true.B
+    // 如果confidence下降到0，更新stride
+    new_cspt_entry.stride := Mux(new_conf === 0.U, s2_stride, s2_cspt_rdata.stride)
+    new_cspt_entry.confidence := new_conf
+    printf(p"[CPLXPrefetcher] CSPT UPDATE: sig=0x${Hexadecimal(s2_signature)}, old_stride=0x${Hexadecimal(s2_cspt_rdata.stride)}, new_stride=0x${Hexadecimal(new_cspt_entry.stride)}, old_conf=${s2_cspt_rdata.confidence}, new_conf=${new_cspt_entry.confidence}\n")
+    when (CPLX_DEBUG) {
+      printf(p"[CPLXPrefetcher] S2 CSPT UPDATE: pc=0x${Hexadecimal(s2_pc)}, idx=${s2_index}, vaddr=0x${Hexadecimal(s2_vaddr)}, paddr=0x${Hexadecimal(s2_paddr)}, stride=0x${Hexadecimal(s2_stride)}\n")
+    }
+  }
+
+  when (s2_cspt_alloc || s2_cspt_update) {
+    cspt_table.map( cspt => cspt.write(s2_signature, new_cspt_entry))
+  }
+
+  def update_signature(old_signature: UInt, stride: UInt): UInt = {
+    val new_signature = Wire(UInt(SIGNATURE_BITS.W))
+    val cspt_stride = new_cspt_entry.stride
+    new_signature := (old_signature << 3.U)(SIGNATURE_BITS-1,0) ^ cspt_stride
+    new_signature
+  }
+
+  // 写入IP Table对应表项，需要注意s2写入可能会有s1读或者s0读的冒险?
+  val s2_hazard_prevent = s1_alloc && s1_index === s2_index
+  when (s2_valid && !s2_hazard_prevent) {
+    val new_sig = update_signature(s2_signature, s2_stride)
+    s2_new_signature := new_sig
+    ip_table(s2_index).update(
+      vaddr = s2_vaddr,
+      new_signature = new_sig
+    )
+    printf(p"[CPLXPrefetcher] IP Table UPDATE: pc=0x${Hexadecimal(s2_pc)}, idx=${s2_index}, vaddr=0x${Hexadecimal(s2_vaddr)}, paddr=0x${Hexadecimal(s2_paddr)}, old_sig=0x${Hexadecimal(s2_signature)}, new_sig=0x${Hexadecimal(new_sig)}, cspt_conf=${new_cspt_entry.confidence}, cspt_stride=0x${Hexadecimal(new_cspt_entry.stride)}\n")
+  }
+
+  val s3_cspt_rdata = cspt_table(1).read(s2_new_signature, s2_valid && !s2_hazard_prevent)
+
+  val s3_valid = RegInit(false.B)
+  val s3_paddr = RegEnable(s2_paddr, s2_valid && !s2_hazard_prevent)
+  val s3_vaddr = RegEnable(s2_vaddr, s2_valid && !s2_hazard_prevent)
+  val s3_pc = RegEnable(s2_pc, s2_valid && !s2_hazard_prevent)
+  val s3_signature = RegEnable(s2_new_signature, s2_valid && !s2_hazard_prevent)
+  when (s2_valid && !s2_hazard_prevent) {
+    s3_valid := true.B
+  }.otherwise {
+    s3_valid := false.B
+  }
+
+  val s3_can_send_pf = s3_valid && s3_cspt_rdata.confidence >= 1.U && s3_cspt_rdata.stride =/= 0.U
+  // Restore byte address for prefetch request
+  val s3_pf_vaddr = (s3_vaddr + s3_cspt_rdata.stride) << lgCacheBlockBytes
+  val s3_pf_paddr = (s3_paddr + s3_cspt_rdata.stride) << lgCacheBlockBytes
+  val cacheable = edge.manager.supportsAcquireBSafe(s3_pf_paddr, lgCacheBlockBytes.U)
+  val s3_pf_req_valid = s3_can_send_pf && samePage(s3_pf_vaddr, s3_vaddr << lgCacheBlockBytes) && cacheable
+  io.prefetch.valid := s3_pf_req_valid
+  io.prefetch.bits.addr := s3_pf_paddr
+  io.prefetch.bits.uop := NullMicroOp
+  io.prefetch.bits.uop.mem_cmd := M_PFR
+  io.prefetch.bits.uop.debug_pc := s2_pc
+  io.prefetch.bits.data := DontCare
+  io.prefetch.bits.vaddr := s3_pf_vaddr
+  io.prefetch.bits.is_hella := false.B
+  io.prefetch_type := io.id
+
+  // Debug: 预取请求输出
+  when (io.prefetch.fire) {
+    printf(p"[CSPTPrefetcher] PREFETCH(for pc=0x${Hexadecimal(s3_pc)}, sig=0x${Hexadecimal(s3_signature)}): paddr=0x${Hexadecimal(s3_pf_paddr)}, vaddr=0x${Hexadecimal(s3_pf_vaddr)}, stride=0x${Hexadecimal(s3_cspt_rdata.stride)}, conf=${s3_cspt_rdata.confidence}\n")
+  }
+
+  io.prefetch_translation_req.valid := false.B
+  io.prefetch_translation_req.bits.translation_vaddr := DontCare
+  io.prefetch_translation_resp.ready := false.B
+
+/*
+ * TODO: support flush prefetcher
+  for(i <- 0 until STRIDE_ENTRY_NUM) {
+    when(GatedValidRegNext(io.flush)) {
+      reset_array(i)
+    }
+  }
+*/
+}
+
+
 class StreamPrefetchEngine(implicit p: Parameters, implicit val edge: TLEdgeOut) extends BoomModule with HasStreamPrefetchHelper with HasStridePrefetcherConstants {
   val io = IO(new Bundle {
     val l1_prefetch_req = Flipped(Decoupled(new StreamPrefetchReqBundle))

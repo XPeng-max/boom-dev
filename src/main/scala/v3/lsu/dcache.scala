@@ -581,7 +581,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     (enableNextLinePrefetcher,      (e, p) => new NLPrefetcher()(e, p)),
     (enableVaddrNextLinePrefetcher, (e, p) => new VAddrNLPrefetcher()(e, p)),
     (enableStridePrefetcher,        (e, p) => new StridePrefetcher()(e, p)),
-    (enableStreamPrefetcher,        (e, p) => new StreamPrefetcher()(e, p))
+    (enableStreamPrefetcher,        (e, p) => new StreamPrefetcher()(e, p)),
+    (enableCPLXPrefetcher,         (e, p) => new CPLXPrefetcher()(e, p))
   )
   val enabledPrefetchers = prefetcherConfigs.filter(_._1).map(_._2)
 
@@ -820,13 +821,13 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s1_wb_idx_matches = widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid)
 
   // Alecto Sample and Allocation Table Search
+  when (s1_valid(0) && s1_type === t_lsu && !io.lsu.s1_kill(0)) {
+    printf(p"[DCache] S1 LSU Access: PC = 0x${Hexadecimal(s1_req(0).uop.debug_pc)}, Addr = 0x${Hexadecimal(s1_addr(0))}, PrefetchType = ${s1_prefetch_type}\n")
+  }
   if (enableAlecto) {
     sample_table.get.io.sample_update.valid := sandbox_table.get.io.sample_update.valid && !(s1_valid(0) && s1_type === t_lsu && io.lsu.s1_kill(0))
     sample_table.get.io.sample_update.bits := sandbox_table.get.io.sample_update.bits
     allocation_table.get.io.allocation_update <> sample_table.get.io.allocation_update
-    when (s1_valid(0) && s1_type === t_lsu && !io.lsu.s1_kill(0)) {
-      printf(p"[DCache] S1 LSU Access: PC = 0x${Hexadecimal(s1_req(0).uop.debug_pc)}, Addr = 0x${Hexadecimal(s1_addr(0))}, PrefetchType = ${s1_prefetch_type}\n")
-    }
     allocation_table.get.io.allocation_req.valid := s1_valid(0) && s1_type === t_lsu && !io.lsu.s1_kill(0)
     allocation_table.get.io.allocation_req.bits.pc :=  s1_req(0).uop.debug_pc
   }
@@ -1002,6 +1003,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   // ========================================================================
   
   // Training is triggered for LSU requests (not prefetches, replays, probes, etc.)
+  when (s2_valid(0) && s2_type === t_lsu && isRead(s2_req(0).uop.mem_cmd)) {
+    printf(p"[DCache] S2 Prefetcher Train: PC = 0x${Hexadecimal(s2_req(0).uop.debug_pc)}, Addr = 0x${Hexadecimal(s2_req(0).addr)}, VAddr = 0x${Hexadecimal(s2_req(0).vaddr)}, Hit = ${s2_hit(0)}, ReqMiss = ${!s2_tag_match(0)}, PrefetchInfo = ${s2_prefetch_info(0)}\n")
+  }
   val s2_train_valid = s2_valid(0) && s2_type === t_lsu && isRead(s2_req(0).uop.mem_cmd) 
   
   // Connect prefetcher training inputs

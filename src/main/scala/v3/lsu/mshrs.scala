@@ -240,6 +240,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     when (io.mem_acquire.fire) {
       state := s_refill_resp
     }
+    printf(p"[MSHR${io.id}] Refill request for addr 0x${Hexadecimal(Cat(req_tag, req_idx) << blockOffBits)}\n")
   } .elsewhen (state === s_refill_resp) {
     when (edge.hasData(io.mem_grant.bits)) {
       io.mem_grant.ready      := io.lb_write.ready

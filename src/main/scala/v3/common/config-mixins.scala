@@ -371,6 +371,57 @@ class WithNStreamPrefetchMediumBooms(n: Int = 1) extends Config(
 )
 
 /**
+ * 2-wide BOOM (with CPLX Prefetching)
+ */
+class WithNCPLXPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              prefetcherParams = PrefetcherParams(
+                enableNextLine = false,
+                enableCPLX = true
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
+
+/**
  * 2-wide BOOM. (with Prefetching)
  */
 class WithNIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
