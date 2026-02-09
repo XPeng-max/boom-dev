@@ -236,6 +236,9 @@ class LDQEntry(implicit p: Parameters) extends BoomBundle()(p)
   val forward_stq_idx     = UInt(stqAddrSz.W) // Which store did we get the store-load forward from?
 
   val debug_wb_data       = UInt(xLen.W)
+
+  val vaddr               = UInt(coreMaxAddrBits.W) // Save virtual address for prefetcher training
+  val trained             = Bool() // Whether this load has already been sent for prefetcher training
 }
 
 class STQEntry(implicit p: Parameters) extends BoomBundle()(p)
@@ -396,6 +399,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(ld_enq_idx).bits.order_fail      := false.B
       ldq(ld_enq_idx).bits.observed        := false.B
       ldq(ld_enq_idx).bits.forward_std_val := false.B
+      ldq(ld_enq_idx).bits.trained         := false.B
 
       assert (ld_enq_idx === io.core.dis_uops(w).bits.ldq_idx, "[lsu] mismatch enq load tag.")
       assert (!ldq(ld_enq_idx).valid, "[lsu] Enqueuing uop is overwriting ldq entries")
@@ -464,8 +468,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val will_fire_store_commit   = Wire(Vec(memWidth, Bool()))
   val will_fire_load_wakeup    = Wire(Vec(memWidth, Bool()))
 
+  // exe请求，即memWidth个来自EXE单元的请求
   val exe_req = WireInit(VecInit(io.core.exe.map(_.req)))
   // Sfence goes through all pipes
+  // 如果存在sfence请求，则所有请求都设置为该sfence请求
   for (i <- 0 until memWidth) {
     when (io.core.exe(i).req.bits.sfence.valid) {
       exe_req := VecInit(Seq.fill(memWidth) { io.core.exe(i).req })
@@ -489,17 +495,21 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   // Delay firing load wakeups and retries now
   val store_needs_order = WireInit(false.B)
 
+  // exe部件请求的ldq_idx
   val ldq_incoming_idx = widthMap(i => exe_req(i).bits.uop.ldq_idx)
+  // exe部件请求的ldq entry
   val ldq_incoming_e   = widthMap(i => ldq(ldq_incoming_idx(i)))
 
   val stq_incoming_idx = widthMap(i => exe_req(i).bits.uop.stq_idx)
   val stq_incoming_e   = widthMap(i => stq(stq_incoming_idx(i)))
 
+  // ldq retry逻辑，选取ldq entry中地址有效且为虚拟地址且未被block的最老的entry
   val ldq_retry_idx = RegNext(AgePriorityEncoder((0 until numLdqEntries).map(i => {
     val e = ldq(i).bits
     val block = block_load_mask(i) || p1_block_load_mask(i)
     e.addr.valid && e.addr_is_virtual && !block
   }), ldq_head))
+  // ldq retry entry
   val ldq_retry_e            = ldq(ldq_retry_idx)
 
   val stq_retry_idx = RegNext(AgePriorityEncoder((0 until numStqEntries).map(i => {
@@ -510,40 +520,49 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   val stq_commit_e  = stq(stq_execute_head)
 
+  // ldq wakeup逻辑，选取ldq entry中地址有效且未执行且未成功且为物理地址且未被block的最老的entry
   val ldq_wakeup_idx = RegNext(AgePriorityEncoder((0 until numLdqEntries).map(i=> {
     val e = ldq(i).bits
     val block = block_load_mask(i) || p1_block_load_mask(i)
     e.addr.valid && !e.executed && !e.succeeded && !e.addr_is_virtual && !block
   }), ldq_head))
+  // ldq wakeup entry
   val ldq_wakeup_e   = ldq(ldq_wakeup_idx)
 
   // -----------------------
   // Determine what can fire
 
   // Can we fire a incoming load
+  // exe部件请求是否存在load请求
   val can_fire_load_incoming = widthMap(w => exe_req(w).valid && exe_req(w).bits.uop.ctrl.is_load)
 
   // Can we fire an incoming store addrgen + store datagen
+  // exe部件请求是否存在同时包含store addrgen和store datagen的请求
   val can_fire_stad_incoming = widthMap(w => exe_req(w).valid && exe_req(w).bits.uop.ctrl.is_sta
                                                               && exe_req(w).bits.uop.ctrl.is_std)
 
   // Can we fire an incoming store addrgen
+  // exe部件请求是否存在store addrgen请求
   val can_fire_sta_incoming  = widthMap(w => exe_req(w).valid && exe_req(w).bits.uop.ctrl.is_sta
                                                               && !exe_req(w).bits.uop.ctrl.is_std)
 
   // Can we fire an incoming store datagen
+  // exe部件请求是否存在store datagen请求
   val can_fire_std_incoming  = widthMap(w => exe_req(w).valid && exe_req(w).bits.uop.ctrl.is_std
                                                               && !exe_req(w).bits.uop.ctrl.is_sta)
 
   // Can we fire an incoming sfence
+  // exe部件请求是否存在sfence请求
   val can_fire_sfence        = widthMap(w => exe_req(w).valid && exe_req(w).bits.sfence.valid)
 
   // Can we fire a request from dcache to release a line
   // This needs to go through LDQ search to mark loads as dangerous
+  // 是否存在dcache的release请求（对应cache line被其他core访问需要进行release）
   val can_fire_release       = widthMap(w => (w == memWidth-1).B && io.dmem.release.valid)
   io.dmem.release.ready     := will_fire_release.reduce(_||_)
 
   // Can we retry a load that missed in the TLB
+  // LDQ 中存在 TLB miss 的 load，且未被 block、TLB miss ready、且不需 store order、且必须是最后一条管线等
   val can_fire_load_retry    = widthMap(w =>
                                ( ldq_retry_e.valid                            &&
                                  ldq_retry_e.bits.addr.valid                  &&
@@ -649,6 +668,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
     assert(!(exe_req(w).valid && !(will_fire_load_incoming(w) || will_fire_stad_incoming(w) || will_fire_sta_incoming(w) || will_fire_std_incoming(w) || will_fire_sfence(w))))
 
+    // load wakeup、load incoming、load retry发射后暂时阻塞该load对应的ldq entry，防止同一load在短时间内被多次发射
     when (will_fire_load_wakeup(w)) {
       block_load_mask(ldq_wakeup_idx)           := true.B
     } .elsewhen (will_fire_load_incoming(w)) {
@@ -857,6 +877,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     io.dmem.s1_kill(w) := false.B
 
     when (will_fire_load_incoming(w)) {
+      // 如果没有TLB MISS且地址是cacheable的，发起load请求
       dmem_req(w).valid      := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
       dmem_req(w).bits.addr  := exe_tlb_paddr(w)
       dmem_req(w).bits.uop   := exe_tlb_uop(w)
@@ -892,7 +913,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).valid      := true.B
       dmem_req(w).bits.addr  := ldq_wakeup_e.bits.addr.bits
       dmem_req(w).bits.uop   := ldq_wakeup_e.bits.uop
-      dmem_req(w).bits.vaddr := 0.U
+      // Use saved vaddr from LDQ if not yet trained, otherwise 0 to avoid duplicate training
+      dmem_req(w).bits.vaddr := Mux(!ldq_wakeup_e.bits.trained, ldq_wakeup_e.bits.vaddr, 0.U)
 
       s0_executing_loads(ldq_wakeup_idx) := dmem_req_fire(w)
 
@@ -940,6 +962,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(ldq_idx).bits.uop.pdst            := exe_tlb_uop(w).pdst
       ldq(ldq_idx).bits.addr_is_virtual     := exe_tlb_miss(w)
       ldq(ldq_idx).bits.addr_is_uncacheable := exe_tlb_uncacheable(w) && !exe_tlb_miss(w)
+      ldq(ldq_idx).bits.vaddr               := exe_tlb_vaddr(w) // Save vaddr for prefetcher training
 
       assert(!(will_fire_load_incoming(w) && ldq_incoming_e(w).bits.addr.valid),
         "[lsu] Incoming load is overwriting a valid address")
@@ -1271,7 +1294,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   // Set execute bit in LDQ
   for (i <- 0 until numLdqEntries) {
-    when (s1_set_execute(i)) { ldq(i).bits.executed := true.B }
+    when (s1_set_execute(i)) {
+      ldq(i).bits.executed := true.B
+      ldq(i).bits.trained  := true.B // Mark as trained: request reached dcache s2, prefetcher has seen it
+    }
   }
 
   // Find the youngest store which the load is dependent on
