@@ -528,6 +528,550 @@ class WithNAlectoIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
   })
 )
 
+/**
+ * 2-wide BOOM. (with Prefetching)
+ */
+class WithNStrideCPLXIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              prefetcherParams = PrefetcherParams(
+                enableIntegrated = true,
+                enableNextLine = false,
+                enableStream = false,
+                enableStride = true,
+                enableCPLX = true,
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
+
+/**
+ * 2-wide BOOM. (with CPLX + NextLine Prefetching)
+ */
+class WithNCPLXNextLineIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              prefetcherParams = PrefetcherParams(
+                enableIntegrated = true,
+                enableNextLine = true,
+                enableStream = false,
+                enableStride = false,
+                enableCPLX = true,
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
+
+/**
+ * 2-wide BOOM. (with CPLX + Stream Prefetching)
+ */
+class WithNCPLXStreamIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              prefetcherParams = PrefetcherParams(
+                enableIntegrated = true,
+                enableNextLine = false,
+                enableStream = true,
+                enableStride = false,
+                enableCPLX = true,
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
+
+/**
+ * 2-wide BOOM. (with NextLine + Stride Prefetching)
+ */
+class WithNNextLineStrideIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              prefetcherParams = PrefetcherParams(
+                enableIntegrated = true,
+                enableNextLine = true,
+                enableStream = false,
+                enableStride = true,
+                enableCPLX = false,
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
+
+/**
+ * 2-wide BOOM. (with NextLine + Stream Prefetching)
+ */
+class WithNNextLineStreamIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              prefetcherParams = PrefetcherParams(
+                enableIntegrated = true,
+                enableNextLine = true,
+                enableStream = true,
+                enableStride = false,
+                enableCPLX = false,
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
+
+/**
+ * 2-wide BOOM. (with CPLX + NextLine + Alecto Prefetching)
+ */
+class WithNCPLXNextLineAlectoIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              enableAlecto = true,
+              prefetcherParams = PrefetcherParams(
+                enableIntegrated = true,
+                enableNextLine = true,
+                enableStream = false,
+                enableStride = false,
+                enableCPLX = true,
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
+
+/**
+ * 2-wide BOOM. (with CPLX + Stream + Alecto Prefetching)
+ */
+class WithNCPLXStreamAlectoIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              enableAlecto = true,
+              prefetcherParams = PrefetcherParams(
+                enableIntegrated = true,
+                enableNextLine = false,
+                enableStream = true,
+                enableStride = false,
+                enableCPLX = true,
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
+
+/**
+ * 2-wide BOOM. (with NextLine + Stride + Alecto Prefetching)
+ */
+class WithNNextLineStrideAlectoIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              enableAlecto = true,
+              prefetcherParams = PrefetcherParams(
+                enableIntegrated = true,
+                enableNextLine = true,
+                enableStream = false,
+                enableStride = true,
+                enableCPLX = false,
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
+
+/**
+ * 2-wide BOOM. (with NextLine + Stream + Alecto Prefetching)
+ */
+class WithNNextLineStreamAlectoIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              enableAlecto = true,
+              prefetcherParams = PrefetcherParams(
+                enableIntegrated = true,
+                enableNextLine = true,
+                enableStream = true,
+                enableStride = false,
+                enableCPLX = false,
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
+
+/**
+ * 2-wide BOOM. (with Prefetching)
+ */
+class WithNStrideCPLXAlectoIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = up(NumTiles)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 4,
+              decodeWidth = 2,
+              numRobEntries = 64,
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 16,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true)),
+              enablePrefetching = true,
+              enableAlecto = true,
+              prefetcherParams = PrefetcherParams(
+                enableIntegrated = true,
+                enableNextLine = false,
+                enableStream = false,
+                enableStride = true,
+                enableCPLX = true,
+              )
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 64, nSets=64, nWays=4, nMSHRs=8, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 64, nSets=64, nWays=4, fetchBytes=2*4)
+            ),
+            tileId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case NumTiles => up(NumTiles) + n
+  })
+)
 
 
 
