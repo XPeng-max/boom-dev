@@ -269,31 +269,38 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
       s1_new_entry.valid := true.B
       s1_new_entry.pc_hash_tag := s1_read_entry.pc_hash_tag
       s1_new_entry.demand := s1_read_entry.demand
-      s1_new_entry.confirmed := s1_read_entry.confirmed
-      s1_new_entry.issued := s1_read_entry.issued
-      // 饱和加法
-      when (s1_read_entry.issued(s1_prefetch_type) < ((1.U << SAMPLE_TABLE_COUNTER_WIDTH) - 1.U)) {
-        s1_new_entry.issued(s1_prefetch_type) := s1_read_entry.issued(s1_prefetch_type) + 1.U
+      for (i <- 0 until num_prefetchers) {
+        s1_new_entry.confirmed(i) := s1_read_entry.confirmed(i)
+        s1_new_entry.issued(i) := s1_read_entry.issued(i)
+      }
+      // 饱和加法 - 使用循环展开避免动态索引问题
+      for (i <- 0 until num_prefetchers) {
+        when (s1_prefetch_type === i.U) {
+          when (s1_read_entry.issued(i) < ((1.U << SAMPLE_TABLE_COUNTER_WIDTH) - 1.U)) {
+            s1_new_entry.issued(i) := s1_read_entry.issued(i) + 1.U
+          }
+        }
       }
     } .otherwise {
       // 未命中：替换 entry，初始化
       s1_new_entry.valid := true.B
       s1_new_entry.pc_hash_tag := s1_tag
       s1_new_entry.demand := 0.U
-      // 初始化所有计数器为 0
+      // 初始化所有计数器为 0，然后设置对应类型的 issued 为 1
       for (i <- 0 until num_prefetchers) {
-        s1_new_entry.issued(i) := 0.U
+        s1_new_entry.issued(i) := Mux(s1_prefetch_type === i.U, 1.U, 0.U)
         s1_new_entry.confirmed(i) := 0.U
       }
-      s1_new_entry.issued(s1_prefetch_type) := 1.U
     }
-    printf(p"[SampleTable] Issued updated for prefetch_type ${s1_prefetch_type}, pc_hash: ${s1_pc_hash}, confirmed: ${s1_new_entry.confirmed(s1_prefetch_type)}, issued: ${s1_new_entry.issued(s1_prefetch_type)}\n")
+    printf(p"[SampleTable] Issued updated for prefetch_type ${s1_prefetch_type}, pc_hash: ${s1_pc_hash}\n")
   } .elsewhen (s1_demand_valid && s1_hit) {
     // 命中：更新 demand + 1
     s1_new_entry.valid := true.B
     s1_new_entry.pc_hash_tag := s1_read_entry.pc_hash_tag
-    s1_new_entry.issued := s1_read_entry.issued
-    s1_new_entry.confirmed := s1_read_entry.confirmed
+    for (i <- 0 until num_prefetchers) {
+      s1_new_entry.issued(i) := s1_read_entry.issued(i)
+      s1_new_entry.confirmed(i) := s1_read_entry.confirmed(i)
+    }
     // 饱和加法
     s1_new_entry.demand := Mux(
       s1_read_entry.demand < ((1.U << SAMPLE_TABLE_COUNTER_WIDTH) - 1.U),
@@ -304,12 +311,16 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
       s1_new_entry.demand := 1.U
     }
     printf(p"[SampleTable] Demand updated for prefetch_type ${s1_prefetch_type}, pc_hash: ${s1_pc_hash}, demand: ${s1_new_entry.demand}\n")
-    // 如果 is_confirmed，更新 confirmed(prefetch_type)
+    // 如果 is_confirmed，更新 confirmed(prefetch_type) - 使用循环展开
     when (s1_is_confirmed) {
-      when (s1_read_entry.confirmed(s1_prefetch_type) < ((1.U << SAMPLE_TABLE_COUNTER_WIDTH) - 1.U)) {
-        s1_new_entry.confirmed(s1_prefetch_type) := s1_read_entry.confirmed(s1_prefetch_type) + 1.U
+      for (i <- 0 until num_prefetchers) {
+        when (s1_prefetch_type === i.U) {
+          when (s1_read_entry.confirmed(i) < ((1.U << SAMPLE_TABLE_COUNTER_WIDTH) - 1.U)) {
+            s1_new_entry.confirmed(i) := s1_read_entry.confirmed(i) + 1.U
+          }
+        }
       }
-      printf(p"[SampleTable] Confirmed updated for prefetch_type ${s1_prefetch_type}, pc_hash: ${s1_pc_hash}, confirmed: ${s1_new_entry.confirmed(s1_prefetch_type)}, issued: ${s1_new_entry.issued(s1_prefetch_type)}\n")
+      printf(p"[SampleTable] Confirmed updated for prefetch_type ${s1_prefetch_type}, pc_hash: ${s1_pc_hash}\n")
     }
   }
 
@@ -321,10 +332,16 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
 
   when (s1_should_write) {
     table.write(s1_idx, s1_new_entry)
-    // 更新旁路寄存器
+    // 更新旁路寄存器 - 逐字段赋值避免 CIRCT packed array 问题
     bypass_valid := true.B
     bypass_idx := s1_idx
-    bypass_entry := s1_new_entry
+    bypass_entry.valid := s1_new_entry.valid
+    bypass_entry.pc_hash_tag := s1_new_entry.pc_hash_tag
+    bypass_entry.demand := s1_new_entry.demand
+    for (i <- 0 until num_prefetchers) {
+      bypass_entry.issued(i) := s1_new_entry.issued(i)
+      bypass_entry.confirmed(i) := s1_new_entry.confirmed(i)
+    }
   } .otherwise {
     bypass_valid := false.B
   }
@@ -343,8 +360,11 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
     // 触发新的 allocation 输出
     alloc_valid := true.B
     alloc_bits.pc_hash := s1_pc_hash
-    alloc_bits.issued := s1_new_entry.issued
-    alloc_bits.confirmed := s1_new_entry.confirmed
+    // 逐元素赋值避免 CIRCT packed array 问题
+    for (i <- 0 until num_prefetchers) {
+      alloc_bits.issued(i) := s1_new_entry.issued(i)
+      alloc_bits.confirmed(i) := s1_new_entry.confirmed(i)
+    }
   } .elsewhen (io.allocation_update.fire) {
     alloc_valid := false.B
   }
@@ -506,10 +526,14 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
 
   when (s1_should_write) {
     table.write(s1_update_idx, s1_new_entry)
-    // 更新旁路寄存器
+    // 更新旁路寄存器 - 逐字段赋值避免 CIRCT packed array 问题
     bypass_valid := true.B
     bypass_idx := s1_update_idx
-    bypass_entry := s1_new_entry
+    bypass_entry.valid := s1_new_entry.valid
+    bypass_entry.pc_hash_tag := s1_new_entry.pc_hash_tag
+    for (i <- 0 until num_prefetchers) {
+      bypass_entry.prefetch_degree(i) := s1_new_entry.prefetch_degree(i)
+    }
     
     // Debug: allocation_update 更新结果
     printf(p"[AllocationTable] Update: pc_hash=0x${Hexadecimal(s1_update_pc_hash)}, idx=${s1_update_idx}, hit=${s1_update_hit}\n")
