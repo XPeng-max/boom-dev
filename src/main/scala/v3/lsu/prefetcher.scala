@@ -1152,7 +1152,7 @@ class CPLXPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefet
   io.prefetch.bits.addr := s3_pf_paddr
   io.prefetch.bits.uop := NullMicroOp
   io.prefetch.bits.uop.mem_cmd := M_PFR
-  io.prefetch.bits.uop.debug_pc := s2_pc
+  io.prefetch.bits.uop.debug_pc := s3_pc
   io.prefetch.bits.data := DontCare
   io.prefetch.bits.vaddr := s3_pf_vaddr
   io.prefetch.bits.is_hella := false.B
