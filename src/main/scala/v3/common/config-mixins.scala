@@ -510,6 +510,7 @@ class WithNAlectoIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
                 enableNextLine = true,
                 enableStream = true,
                 enableStride = true,
+                enableCPLX = true
               )
             ),
             dcache = Some(
