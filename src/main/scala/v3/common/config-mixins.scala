@@ -453,7 +453,7 @@ class WithNIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
               enablePrefetching = true,
               prefetcherParams = PrefetcherParams(
                 enableIntegrated = true,
-                enableNextLine = false,
+                enableNextLine = true,
                 enableStream = true,
                 enableStride = true,
               )
@@ -507,7 +507,7 @@ class WithNAlectoIntegratedPrefetchMediumBooms(n: Int = 1) extends Config(
               enableAlecto = true,
               prefetcherParams = PrefetcherParams(
                 enableIntegrated = true,
-                enableNextLine = false,
+                enableNextLine = true,
                 enableStream = true,
                 enableStride = true,
               )
