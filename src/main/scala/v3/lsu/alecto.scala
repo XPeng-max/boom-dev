@@ -54,6 +54,8 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
     val req = Flipped(Valid(new SandboxRequest))
     val sample_update = Valid(new SampleUpdate)
     val kill_prefetch = Output(Bool())
+    val sandbox_alloc = Output(Bool()) // Indicates when a new sandbox entry is allocated (for testing/debugging)
+    val sandbox_alloc_repl = Output(Bool()) // Indicates when a new sandbox entry is allocated due to replacement (for testing/debugging) 
   })
 
   io.kill_prefetch := false.B
@@ -102,6 +104,10 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
   val s1_new_entry = Wire(new SandboxTableEntry)
   s1_new_entry := s1_entry // 默认保持不变
 
+  // ========== 默认输出 ==========
+  io.sandbox_alloc := false.B
+  io.sandbox_alloc_repl := false.B
+
   // ========== 写回逻辑 ==========
   val s1_prefetch_valid = s1_valid && s1_is_prefetch
   val s1_prefetch_alloc = s1_prefetch_valid && !s1_hit
@@ -116,6 +122,8 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
     s1_new_entry.addr_tag := s1_addr_tag
     s1_new_entry.prefetch_type := s1_prefetch_type - 1.U // Alecto在Sandbox Table之后prefetch_type减1，用于进行索引
     s1_new_entry.confirmed := false.B // 初始时为false
+    io.sandbox_alloc := true.B
+    io.sandbox_alloc_repl := s1_entry.valid // 如果替换掉一个有效entry，则认为是repl
   } .elsewhen(s1_demand_confirmed) {
     // Debug: 需求请求查询sandbox
     // 对于需求请求，如果是命中且未确认过的，进行标记
@@ -171,7 +179,7 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
 
   // ========== Assertions ==========
   // Validate prefetch_type is in valid range (0 = demand, 1-3 = prefetch types)
-  assert(!io.req.valid || io.prefetch_type <= 3.U,
+  assert(!io.req.valid || io.prefetch_type <= 4.U,
     "SandboxTable: prefetch_type out of range (must be 0-3)")
   
   // When prefetch request, prefetch_type should not be 0
@@ -207,12 +215,15 @@ class AllocationUpdate(num_prefetchers: Int)(implicit p: Parameters) extends Boo
 
 
 class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModule with HasAlectoParameters {
-  require(num_prefetchers > 0 && num_prefetchers <= 3, 
-    s"SampleTable: num_prefetchers must be 1-3, got $num_prefetchers")
+  require(num_prefetchers > 0 && num_prefetchers <= 4, 
+    s"SampleTable: num_prefetchers must be 1-4, got $num_prefetchers")
 
   val io = IO(new Bundle {
     val sample_update = Flipped(Valid(new SampleUpdate))
     val allocation_update = Decoupled(new AllocationUpdate(num_prefetchers))
+    val sample_alloc = Output(Bool()) // Indicates when a new sample allocation is generated (for testing/debugging)
+    val sample_alloc_repl = Output(Bool()) // Indicates when a sample allocation is generated due to replacement (for testing/debugging)
+    val sample_discard_allocation_update = Output(Bool()) // Indicates when a allocation update is discarded due to pending allocation update (for testing/debugging)
   })
 
   // ========== 存储结构 (SyncReadMem) ==========
@@ -259,6 +270,10 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
   val s1_new_entry = Wire(new SampleTableEntry(num_prefetchers))
   s1_new_entry := s1_read_entry // 默认保持不变
 
+  // ========== 默认输出 ==========
+  io.sample_alloc := false.B
+  io.sample_alloc_repl := false.B
+
   val s1_prefetch_valid = s1_valid && s1_is_prefetch
   val s1_demand_valid = s1_valid && !s1_is_prefetch
 
@@ -291,8 +306,14 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
         s1_new_entry.issued(i) := Mux(s1_prefetch_type === i.U, 1.U, 0.U)
         s1_new_entry.confirmed(i) := 0.U
       }
+      io.sample_alloc := true.B
+      io.sample_alloc_repl := s1_read_entry.valid // 如果替换掉一个有效entry，则认为是repl
     }
-    printf(p"[SampleTable] Issued updated for prefetch_type ${s1_prefetch_type}, pc_hash: ${s1_pc_hash}\n")
+    printf(p"[SampleTable] Issued updated for prefetch_type ${s1_prefetch_type}, pc_hash: ${s1_pc_hash}, s1_new_demand: ${s1_new_entry.demand}\n")
+    for (i <- 0 until num_prefetchers) {
+      printf(p"[SampleTable] Issued[${i}] = ${s1_new_entry.issued(i)}, Confirmed[${i}] = ${s1_new_entry.confirmed(i)}; ")
+    }
+    printf(p"\n")
   } .elsewhen (s1_demand_valid && s1_hit) {
     // 命中：更新 demand + 1
     s1_new_entry.valid := true.B
@@ -320,7 +341,12 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
           }
         }
       }
-      printf(p"[SampleTable] Confirmed updated for prefetch_type ${s1_prefetch_type}, pc_hash: ${s1_pc_hash}\n")
+
+      printf(p"[SampleTable] Confirmed updated for prefetch_type ${s1_prefetch_type}, pc_hash: ${s1_pc_hash}, s1_new_demand: ${s1_new_entry.demand}\n")
+      for (i <- 0 until num_prefetchers) {
+        printf(p"[SampleTable] Issued[${i}] = ${s1_new_entry.issued(i)}, Confirmed[${i}] = ${s1_new_entry.confirmed(i)}; ")
+      }
+      printf(p"\n")
     }
   }
 
@@ -352,10 +378,12 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
   val s1_demand_threshold_reached = s1_valid && s1_hit && !s1_is_prefetch && 
                                      (s1_new_entry.demand >= SAMPLE_DEMAND_THRESHOLD.U)
 
+  // TODO: 记录丢失的更新数量
   // 使用寄存器保存 allocation 输出，直到被接收
   val alloc_valid = RegInit(false.B)
   val alloc_bits = Reg(new AllocationUpdate(num_prefetchers))
 
+  io.sample_discard_allocation_update := alloc_valid && !io.allocation_update.fire && s1_demand_threshold_reached // 如果当前有未被接收的 allocation 更新，则记录丢弃
   when (s1_demand_threshold_reached && (!alloc_valid || io.allocation_update.fire)) {
     // 触发新的 allocation 输出
     alloc_valid := true.B
@@ -411,13 +439,15 @@ class AllocationResponseBundle(num_prefetchers: Int)(implicit p: Parameters) ext
 
 
 class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModule with HasAlectoParameters {
-  require(num_prefetchers > 0 && num_prefetchers <= 3, 
-    s"AllocationTable: num_prefetchers must be 1-3, got $num_prefetchers")
+  require(num_prefetchers > 0 && num_prefetchers <= 4, 
+    s"AllocationTable: num_prefetchers must be 1-4, got $num_prefetchers")
 
   val io = IO(new Bundle {
     val allocation_update = Flipped(Decoupled(new AllocationUpdate(num_prefetchers)))
     val allocation_req = Flipped(Valid(new AllocationRequest))
     val allocation_resp = Valid(new AllocationResponseBundle(num_prefetchers))
+    val allocation_alloc = Output(Bool()) // Indicates when a new allocation entry is generated (for testing/debugging)
+    val allocation_alloc_repl = Output(Bool()) // Indicates when a new allocation entry is generated due to replacement (for testing/debugging) 
   })
   val table = SyncReadMem(ALLOCATION_TABLE_SIZE, new AllocationTableEntry(num_prefetchers))
 
@@ -521,10 +551,16 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
     ))
   }
 
+  // ========== 默认输出 ==========
+  io.allocation_alloc := false.B
+  io.allocation_alloc_repl := false.B
+
   // ========== 写回逻辑 ==========
   val s1_should_write = s1_update_valid
 
   when (s1_should_write) {
+    io.allocation_alloc := !s1_update_hit
+    io.allocation_alloc_repl := !s1_update_hit && s1_update_read_entry.valid
     table.write(s1_update_idx, s1_new_entry)
     // 更新旁路寄存器 - 逐字段赋值避免 CIRCT packed array 问题
     bypass_valid := true.B

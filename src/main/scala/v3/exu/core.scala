@@ -521,6 +521,15 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     event_counters.io.event_signals(19) := io.lsu.dcache_lsu_sec_mshr_num            //dcache lsu secondary mshr hit number
     event_counters.io.event_signals(20) := io.lsu.dcache_prefetch_sec_mshr_num       //dcache prefetch secondary mshr hit number
 
+    // L1 D-Cache statistics for Alecto
+    event_counters.io.event_signals(21) := Mux(io.lsu.alecto_sandbox_alloc_repl, 1.U, 0.U) //dcache alecto sandbox allocation by replacement
+    event_counters.io.event_signals(22) := Mux(io.lsu.alecto_sandbox_alloc, 1.U, 0.U) //dcache alecto sandbox allocation
+    event_counters.io.event_signals(23) := Mux(io.lsu.alecto_sample_alloc_repl, 1.U, 0.U) //dcache alecto sample allocation by replacement
+    event_counters.io.event_signals(24) := Mux(io.lsu.alecto_sample_alloc, 1.U, 0.U) //dcache alecto sample allocation
+    event_counters.io.event_signals(25) := Mux(io.lsu.alecto_allocation_alloc_repl, 1.U, 0.U) //dcache alecto sandbox allocation by replacement
+    event_counters.io.event_signals(26) := Mux(io.lsu.alecto_allocation_alloc, 1.U, 0.U) //dcache alecto allocation
+    event_counters.io.event_signals(27) := Mux(io.lsu.alecto_sample_discard_allocation_update, 1.U, 0.U) //dcache alecto allocation update discarded count
+
     event_counters.io.event_signals(31) :=  PopCount(exe_is_ld.asUInt)       //execute ld number
     event_counters.io.event_signals(32) :=  PopCount(exe_is_st.asUInt)       //execute st number
     event_counters.io.event_signals(33) :=  io.lsu.dtlb_valid_access            //valid dtlb req number

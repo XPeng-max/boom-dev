@@ -785,6 +785,11 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     sandbox_table.get.io.req.bits.addr := s0_req(0).addr
     sandbox_table.get.io.req.bits.pc := s0_req(0).uop.debug_pc
     sandbox_table.get.io.prefetch_type := s0_prefetch_type
+    io.lsu.alecto_sandbox_alloc := sandbox_table.get.io.sandbox_alloc
+    io.lsu.alecto_sandbox_alloc_repl := sandbox_table.get.io.sandbox_alloc_repl
+  } else {
+    io.lsu.alecto_sandbox_alloc := false.B
+    io.lsu.alecto_sandbox_alloc_repl := false.B
   }
 
   val s1_req          = RegNext(s0_req)
@@ -830,6 +835,19 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     allocation_table.get.io.allocation_update <> sample_table.get.io.allocation_update
     allocation_table.get.io.allocation_req.valid := s1_valid(0) && s1_type === t_lsu && !io.lsu.s1_kill(0)
     allocation_table.get.io.allocation_req.bits.pc :=  s1_req(0).uop.debug_pc
+
+    io.lsu.alecto_sample_alloc := sample_table.get.io.sample_alloc
+    io.lsu.alecto_sample_alloc_repl := sample_table.get.io.sample_alloc_repl
+    io.lsu.alecto_sample_discard_allocation_update := sample_table.get.io.sample_discard_allocation_update
+
+    io.lsu.alecto_allocation_alloc := allocation_table.get.io.allocation_alloc
+    io.lsu.alecto_allocation_alloc_repl := allocation_table.get.io.allocation_alloc_repl
+  } else {
+    io.lsu.alecto_sample_alloc := false.B
+    io.lsu.alecto_sample_alloc_repl := false.B
+    io.lsu.alecto_sample_discard_allocation_update := false.B
+    io.lsu.alecto_allocation_alloc := false.B
+    io.lsu.alecto_allocation_alloc_repl := false.B
   }
 
   val s2_req   = RegNext(s1_req)
