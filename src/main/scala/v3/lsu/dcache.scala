@@ -840,6 +840,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     io.lsu.alecto_sample_alloc := sample_table.get.io.sample_alloc
     io.lsu.alecto_sample_alloc_repl := sample_table.get.io.sample_alloc_repl
     io.lsu.alecto_sample_discard_allocation_update := sample_table.get.io.sample_discard_allocation_update
+    io.lsu.alecto_sample_allocation_update := sample_table.get.io.sample_allocation_update
 
     io.lsu.alecto_allocation_alloc := allocation_table.get.io.allocation_alloc
     io.lsu.alecto_allocation_alloc_repl := allocation_table.get.io.allocation_alloc_repl
@@ -847,6 +848,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     io.lsu.alecto_sample_alloc := false.B
     io.lsu.alecto_sample_alloc_repl := false.B
     io.lsu.alecto_sample_discard_allocation_update := false.B
+    io.lsu.alecto_sample_allocation_update := false.B
     io.lsu.alecto_allocation_alloc := false.B
     io.lsu.alecto_allocation_alloc_repl := false.B
   }

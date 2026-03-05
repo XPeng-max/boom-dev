@@ -36,9 +36,9 @@ trait HasAlectoParameters extends HasL1PrefetcherHelper {
     // Epoch-based degree recovery parameters
     // When prefetch_degree is demoted to 0, record the epoch.
     // After ALLOCATION_RESET_EPOCH_THRESHOLD epochs elapse, lazily reset degree to 1 on next access.
-    val ALLOCATION_EPOCH_WIDTH = 4           // 4-bit epoch counter (wraps every 16 ticks)
-    val ALLOCATION_EPOCH_CYCLE_BITS = 9     // Each epoch tick = 512 cycles (~1us @ 1GHz)
-    val ALLOCATION_RESET_EPOCH_THRESHOLD = 2 // Reset degree after 2 epoch ticks (~2048 cycles)
+    val ALLOCATION_EPOCH_WIDTH = 8           // 8-bit epoch counter (wraps every 256 ticks, ~131K cycles)
+    val ALLOCATION_EPOCH_CYCLE_BITS = 9     // Each epoch tick = 512 cycles (~0.5us @ 1GHz)
+    val ALLOCATION_RESET_EPOCH_THRESHOLD = 2 // Reset degree after 2 epoch ticks (~1024 cycles)
 }
 
 // ======================= Sandbox Table =========================
@@ -233,6 +233,7 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
     val sample_alloc = Output(Bool()) // Indicates when a new sample allocation is generated (for testing/debugging)
     val sample_alloc_repl = Output(Bool()) // Indicates when a sample allocation is generated due to replacement (for testing/debugging)
     val sample_discard_allocation_update = Output(Bool()) // Indicates when a allocation update is discarded due to pending allocation update (for testing/debugging)
+    val sample_allocation_update = Output(Bool()) // Indicates when a allocation update is generated (for testing/debugging)
   })
 
   // ========== 存储结构 (SyncReadMem) ==========
@@ -395,6 +396,7 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
   val alloc_bits = Reg(new AllocationUpdate(num_prefetchers))
 
   io.sample_discard_allocation_update := alloc_valid && !io.allocation_update.fire && s1_demand_threshold_reached // 如果当前有未被接收的 allocation 更新，则记录丢弃
+  io.sample_allocation_update := s1_demand_threshold_reached // 记录allocation更新请求数量
   when (s1_demand_threshold_reached && (!alloc_valid || io.allocation_update.fire)) {
     // 触发新的 allocation 输出
     alloc_valid := true.B
@@ -470,8 +472,9 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
   // giving the prefetcher another chance.
   val epoch_counter = RegInit(0.U(ALLOCATION_EPOCH_CYCLE_BITS.W))
   val global_epoch = RegInit(0.U(ALLOCATION_EPOCH_WIDTH.W))
+  val epoch_tick = epoch_counter === ((1 << ALLOCATION_EPOCH_CYCLE_BITS) - 1).U
   epoch_counter := epoch_counter + 1.U
-  when (epoch_counter === 0.U) {
+  when (epoch_tick) {
     global_epoch := global_epoch + 1.U
   }
 

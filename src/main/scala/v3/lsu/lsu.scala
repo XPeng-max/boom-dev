@@ -142,6 +142,7 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val alecto_sample_alloc = Input(Bool())
   val alecto_sample_alloc_repl = Input(Bool())
   val alecto_sample_discard_allocation_update = Input(Bool())
+  val alecto_sample_allocation_update = Input(Bool())
   val alecto_allocation_alloc = Input(Bool())
   val alecto_allocation_alloc_repl = Input(Bool())
 }
@@ -222,6 +223,7 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   val alecto_sample_alloc = Output(Bool())
   val alecto_sample_alloc_repl = Output(Bool())
   val alecto_sample_discard_allocation_update = Output(Bool())
+  val alecto_sample_allocation_update = Output(Bool())
   val alecto_allocation_alloc = Output(Bool())
   val alecto_allocation_alloc_repl = Output(Bool())
 }
@@ -365,6 +367,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   io.core.alecto_sample_alloc := io.dmem.alecto_sample_alloc
   io.core.alecto_sample_alloc_repl := io.dmem.alecto_sample_alloc_repl
   io.core.alecto_sample_discard_allocation_update := io.dmem.alecto_sample_discard_allocation_update
+  io.core.alecto_sample_allocation_update := io.dmem.alecto_sample_allocation_update
   io.core.alecto_allocation_alloc := io.dmem.alecto_allocation_alloc
   io.core.alecto_allocation_alloc_repl := io.dmem.alecto_allocation_alloc_repl
 

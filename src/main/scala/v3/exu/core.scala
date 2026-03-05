@@ -529,6 +529,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     event_counters.io.event_signals(25) := Mux(io.lsu.alecto_allocation_alloc_repl, 1.U, 0.U) //dcache alecto sandbox allocation by replacement
     event_counters.io.event_signals(26) := Mux(io.lsu.alecto_allocation_alloc, 1.U, 0.U) //dcache alecto allocation
     event_counters.io.event_signals(27) := Mux(io.lsu.alecto_sample_discard_allocation_update, 1.U, 0.U) //dcache alecto allocation update discarded count
+    event_counters.io.event_signals(28) := Mux(io.lsu.alecto_sample_allocation_update, 1.U, 0.U) //dcache alecto allocation update count
 
     event_counters.io.event_signals(31) :=  PopCount(exe_is_ld.asUInt)       //execute ld number
     event_counters.io.event_signals(32) :=  PopCount(exe_is_st.asUInt)       //execute st number
