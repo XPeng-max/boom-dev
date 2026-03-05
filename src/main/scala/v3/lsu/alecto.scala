@@ -32,11 +32,17 @@ trait HasAlectoParameters extends HasL1PrefetcherHelper {
     val ALLOCATION_TABLE_BITS = log2Ceil(ALLOCATION_TABLE_SIZE)
     val ALLOCATION_TABLE_TAG_BITS = HASH_TAG_WIDTH - ALLOCATION_TABLE_BITS
     val ALLOCATION_DEGREE_WIDTH = 3
+
+    // Epoch-based degree recovery parameters
+    // When prefetch_degree is demoted to 0, record the epoch.
+    // After ALLOCATION_RESET_EPOCH_THRESHOLD epochs elapse, lazily reset degree to 1 on next access.
+    val ALLOCATION_EPOCH_WIDTH = 4           // 4-bit epoch counter (wraps every 16 ticks)
+    val ALLOCATION_EPOCH_CYCLE_BITS = 9     // Each epoch tick = 512 cycles (~1us @ 1GHz)
+    val ALLOCATION_RESET_EPOCH_THRESHOLD = 2 // Reset degree after 2 epoch ticks (~2048 cycles)
 }
 
 // ======================= Sandbox Table =========================
 class SandboxTableEntry(implicit p: Parameters) extends BoomBundle with HasAlectoParameters {
-    val valid = Bool()
     val confirmed = Bool()
     val pc_hash = UInt(HASH_TAG_WIDTH.W) // PC标签部分
     val addr_tag = UInt(SANDBOX_TABLE_TAG_BITS.W) // 地址标签部分
@@ -61,6 +67,8 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
   io.kill_prefetch := false.B
   // ========== 存储结构 (SyncReadMem) ==========
   val table = SyncReadMem(SANDBOX_TABLE_SIZE, new SandboxTableEntry)
+  // 独立的 valid 位数组 - SyncReadMem 复位后内容未定义，不能依赖其中的 valid 字段
+  val valids = RegInit(VecInit(Seq.fill(SANDBOX_TABLE_SIZE)(false.B)))
 
   // ========== 地址解析辅助函数 ==========
   def getIndex(addr: UInt): UInt = addr(SANDBOX_TABLE_BITS - 1, 0)
@@ -94,8 +102,10 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
   val s1_bypass_hit = bypass_valid && (s1_idx === bypass_idx)
   val s1_entry = Mux(s1_bypass_hit, bypass_entry, s0_read_entry)
 
+  // 使用独立 valids 数组判断槽位有效性（bypass 命中时一定有效，否则查 valids）
+  val s1_slot_valid = s1_bypass_hit || valids(s1_idx)
 
-  val s1_hit = s1_valid && s1_entry.valid && (s1_entry.addr_tag === s1_addr_tag)
+  val s1_hit = s1_valid && s1_slot_valid && (s1_entry.addr_tag === s1_addr_tag)
   val s1_is_confirmed = s1_hit && (s1_entry.pc_hash === s1_pc_hash)
   val s1_need_confirmed = s1_is_confirmed && !s1_entry.confirmed
 
@@ -117,13 +127,12 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
     printf(p"[SandboxTable] Prefetch recorded:s1_hit=${s1_hit}, addr_tag=0x${Hexadecimal(s1_addr_tag)}, pc_hash=0x${Hexadecimal(s1_pc_hash)}, prefetch_type=${s1_prefetch_type - 1.U}, idx=${s1_idx}\n")
     // 对于预取且未命中的请求，分配一个新的entry
     // 对于预取且命中的请求，过滤掉
-    s1_new_entry.valid := true.B
     s1_new_entry.pc_hash := s1_pc_hash
     s1_new_entry.addr_tag := s1_addr_tag
     s1_new_entry.prefetch_type := s1_prefetch_type - 1.U // Alecto在Sandbox Table之后prefetch_type减1，用于进行索引
     s1_new_entry.confirmed := false.B // 初始时为false
     io.sandbox_alloc := true.B
-    io.sandbox_alloc_repl := s1_entry.valid // 如果替换掉一个有效entry，则认为是repl
+    io.sandbox_alloc_repl := s1_slot_valid // 如果替换掉一个有效entry，则认为是repl
   } .elsewhen(s1_demand_confirmed) {
     // Debug: 需求请求查询sandbox
     // 对于需求请求，如果是命中且未确认过的，进行标记
@@ -138,6 +147,7 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
 
   when (s1_should_write) {
     table.write(s1_idx, s1_new_entry)
+    valids(s1_idx) := true.B
     // 更新旁路寄存器
     bypass_valid := true.B
     bypass_idx := s1_idx
@@ -193,7 +203,6 @@ class SandboxTable(implicit p: Parameters) extends BoomModule with HasAlectoPara
 
 // ======================== Sample Table =========================
 class SampleTableEntry(num_prefetchers: Int)(implicit p: Parameters) extends BoomBundle with HasAlectoParameters {
-    val valid = Bool()
     val pc_hash_tag = UInt(SAMPLE_TABLE_TAG_BITS.W) // PC标签部分
     val issued = Vec(num_prefetchers, UInt(SAMPLE_TABLE_COUNTER_WIDTH.W)) // 预取请求发送总数
     val confirmed = Vec(num_prefetchers, UInt(SAMPLE_TABLE_COUNTER_WIDTH.W)) // 匹配的预取请求总数
@@ -228,6 +237,8 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
 
   // ========== 存储结构 (SyncReadMem) ==========
   val table = SyncReadMem(SAMPLE_TABLE_SIZE, new SampleTableEntry(num_prefetchers))
+  // 独立的 valid 位数组 - SyncReadMem 复位后内容未定义，不能依赖其中的 valid 字段
+  val valids = RegInit(VecInit(Seq.fill(SAMPLE_TABLE_SIZE)(false.B)))
 
   // ========== 地址解析辅助函数 ==========
   def getIndex(pc_hash: UInt): UInt = pc_hash(SAMPLE_TABLE_BITS - 1, 0)
@@ -263,8 +274,11 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
   val s1_bypass_hit = bypass_valid && (s1_idx === bypass_idx)
   val s1_read_entry = Mux(s1_bypass_hit, bypass_entry, s0_read_entry)
 
+  // 使用独立 valids 数组判断槽位有效性
+  val s1_slot_valid = s1_bypass_hit || valids(s1_idx)
+
   // 判断是否命中（valid 且 tag 匹配）
-  val s1_hit = s1_read_entry.valid && (s1_read_entry.pc_hash_tag === s1_tag)
+  val s1_hit = s1_slot_valid && (s1_read_entry.pc_hash_tag === s1_tag)
 
   // ========== 构造新 entry ==========
   val s1_new_entry = Wire(new SampleTableEntry(num_prefetchers))
@@ -281,7 +295,6 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
     // 预取请求处理
     when (s1_hit) {
       // 命中：更新 issued(prefetch_type) + 1，其他字段保持
-      s1_new_entry.valid := true.B
       s1_new_entry.pc_hash_tag := s1_read_entry.pc_hash_tag
       s1_new_entry.demand := s1_read_entry.demand
       for (i <- 0 until num_prefetchers) {
@@ -298,7 +311,6 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
       }
     } .otherwise {
       // 未命中：替换 entry，初始化
-      s1_new_entry.valid := true.B
       s1_new_entry.pc_hash_tag := s1_tag
       s1_new_entry.demand := 0.U
       // 初始化所有计数器为 0，然后设置对应类型的 issued 为 1
@@ -307,7 +319,7 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
         s1_new_entry.confirmed(i) := 0.U
       }
       io.sample_alloc := true.B
-      io.sample_alloc_repl := s1_read_entry.valid // 如果替换掉一个有效entry，则认为是repl
+      io.sample_alloc_repl := s1_slot_valid // 如果替换掉一个有效entry，则认为是repl
     }
     printf(p"[SampleTable] Issued updated for prefetch_type ${s1_prefetch_type}, pc_hash: ${s1_pc_hash}, s1_new_demand: ${s1_new_entry.demand}\n")
     for (i <- 0 until num_prefetchers) {
@@ -316,7 +328,6 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
     printf(p"\n")
   } .elsewhen (s1_demand_valid && s1_hit) {
     // 命中：更新 demand + 1
-    s1_new_entry.valid := true.B
     s1_new_entry.pc_hash_tag := s1_read_entry.pc_hash_tag
     for (i <- 0 until num_prefetchers) {
       s1_new_entry.issued(i) := s1_read_entry.issued(i)
@@ -358,10 +369,10 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
 
   when (s1_should_write) {
     table.write(s1_idx, s1_new_entry)
+    valids(s1_idx) := true.B
     // 更新旁路寄存器 - 逐字段赋值避免 CIRCT packed array 问题
     bypass_valid := true.B
     bypass_idx := s1_idx
-    bypass_entry.valid := s1_new_entry.valid
     bypass_entry.pc_hash_tag := s1_new_entry.pc_hash_tag
     bypass_entry.demand := s1_new_entry.demand
     for (i <- 0 until num_prefetchers) {
@@ -424,9 +435,9 @@ class SampleTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModu
 // ======================== Allocation Table =========================
 
 class AllocationTableEntry(num_prefetchers: Int)(implicit p: Parameters) extends BoomBundle with HasAlectoParameters {
-    val valid = Bool() // 有效位
     val pc_hash_tag = UInt(SAMPLE_TABLE_TAG_BITS.W) // PC标签部分
     val prefetch_degree = Vec(num_prefetchers, UInt(ALLOCATION_DEGREE_WIDTH.W)) // 对于各个预取器的预取度
+    val demote_epoch = Vec(num_prefetchers, UInt(ALLOCATION_EPOCH_WIDTH.W)) // 记录 degree 降为 0 时的 epoch
 }
 
 class AllocationRequest(implicit p: Parameters) extends BoomBundle with HasAlectoParameters {
@@ -450,9 +461,26 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
     val allocation_alloc_repl = Output(Bool()) // Indicates when a new allocation entry is generated due to replacement (for testing/debugging) 
   })
   val table = SyncReadMem(ALLOCATION_TABLE_SIZE, new AllocationTableEntry(num_prefetchers))
+  // 独立的 valid 位数组 - SyncReadMem 复位后内容未定义，不能依赖其中的 valid 字段
+  val valids = RegInit(VecInit(Seq.fill(ALLOCATION_TABLE_SIZE)(false.B)))
+
+  // ========== Global epoch counter for degree recovery ==========
+  // When a prefetcher's degree is demoted to 0, we record the current epoch.
+  // On subsequent accesses, if enough epochs have passed, we lazily reset the degree to 1,
+  // giving the prefetcher another chance.
+  val epoch_counter = RegInit(0.U(ALLOCATION_EPOCH_CYCLE_BITS.W))
+  val global_epoch = RegInit(0.U(ALLOCATION_EPOCH_WIDTH.W))
+  epoch_counter := epoch_counter + 1.U
+  when (epoch_counter === 0.U) {
+    global_epoch := global_epoch + 1.U
+  }
+
+  // Helper: check if a degree-0 entry has cooled down enough to be reset to 1
+  def epochExpired(degree: UInt, demote_epoch: UInt): Bool = {
+    degree === 0.U && ((global_epoch - demote_epoch) >= ALLOCATION_RESET_EPOCH_THRESHOLD.U)
+  }
 
   // ========== 地址解析辅助函数 ==========
-  // BUGFIX: These functions should use the parameter, not the captured s0_pc_hash
   def getIndex(pc_hash: UInt): UInt = pc_hash(ALLOCATION_TABLE_BITS - 1, 0)
   def getTag(pc_hash: UInt): UInt = pc_hash(HASH_TAG_WIDTH - 1, ALLOCATION_TABLE_BITS)
 
@@ -484,13 +512,23 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
   val s1_req_bypass_hit = bypass_valid && (s1_req_idx === bypass_idx)
   val s1_req_read_entry = Mux(s1_req_bypass_hit, bypass_entry, read_entry)
 
-  // 判断是否命中
-  val s1_req_hit = s1_req_read_entry.valid && (s1_req_read_entry.pc_hash_tag === s1_req_tag)
+  // 使用独立 valids 数组判断槽位有效性
+  val s1_req_slot_valid = s1_req_bypass_hit || valids(s1_req_idx)
 
-  // 构造响应
+  // 判断是否命中
+  val s1_req_hit = s1_req_slot_valid && (s1_req_read_entry.pc_hash_tag === s1_req_tag)
+
+  // 构造响应 - 包含 epoch-based degree recovery
   val s1_req_resp = Wire(new AllocationResponseBundle(num_prefetchers))
   when (s1_req_hit) {
-    s1_req_resp.prefetch_degree := s1_req_read_entry.prefetch_degree
+    for (i <- 0 until num_prefetchers) {
+      // 如果 degree==0 且 epoch 已过期，返回 1（给预取器重新尝试的机会）
+      s1_req_resp.prefetch_degree(i) := Mux(
+        epochExpired(s1_req_read_entry.prefetch_degree(i), s1_req_read_entry.demote_epoch(i)),
+        1.U,
+        s1_req_read_entry.prefetch_degree(i)
+      )
+    }
   } .otherwise {
     // 未命中，返回默认值 1.U
     for (i <- 0 until num_prefetchers) {
@@ -506,7 +544,11 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
     when (s1_req_hit) {
       printf(p"[AllocationTable] Req HIT: pc_hash=0x${Hexadecimal(s1_req_pc_hash)}, idx=${s1_req_idx}, degrees=")
       for (i <- 0 until num_prefetchers) {
-        printf(p"[${i.U}]=${s1_req_read_entry.prefetch_degree(i)} ")
+        val raw_deg = s1_req_read_entry.prefetch_degree(i)
+        val expired = epochExpired(raw_deg, s1_req_read_entry.demote_epoch(i))
+        printf(p"[${i.U}]=${s1_req_resp.prefetch_degree(i)}")
+        when (expired) { printf(p"(reset)") }
+        printf(p" ")
       }
       printf(p"\n")
     } .otherwise {
@@ -526,8 +568,11 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
   val s1_update_bypass_hit = bypass_valid && (s1_update_idx === bypass_idx)
   val s1_update_read_entry = Mux(s1_update_bypass_hit, bypass_entry, read_entry)
 
+  // 使用独立 valids 数组判断槽位有效性
+  val s1_update_slot_valid = s1_update_bypass_hit || valids(s1_update_idx)
+
   // 判断是否命中
-  val s1_update_hit = s1_update_read_entry.valid && (s1_update_read_entry.pc_hash_tag === s1_update_tag)
+  val s1_update_hit = s1_update_slot_valid && (s1_update_read_entry.pc_hash_tag === s1_update_tag)
 
   // 计算 is_promote 和 is_demote
   val is_promote = VecInit((0 until num_prefetchers).map { i =>
@@ -539,16 +584,30 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
 
   // 构造新 entry
   val s1_new_entry = Wire(new AllocationTableEntry(num_prefetchers))
-  s1_new_entry.valid := true.B
   s1_new_entry.pc_hash_tag := Mux(s1_update_hit, s1_update_read_entry.pc_hash_tag, s1_update_tag)
   
   val max_degree = (1.U << ALLOCATION_DEGREE_WIDTH) - 1.U
   for (i <- 0 until num_prefetchers) {
-    val base_degree = Mux(s1_update_hit, s1_update_read_entry.prefetch_degree(i), 1.U)
+    // base_degree: 命中时从旧 entry 读取，同时应用 epoch recovery
+    val raw_degree = Mux(s1_update_hit, s1_update_read_entry.prefetch_degree(i), 1.U)
+    val epoch_reset = s1_update_hit && epochExpired(
+      s1_update_read_entry.prefetch_degree(i), s1_update_read_entry.demote_epoch(i))
+    val base_degree = Mux(epoch_reset, 1.U, raw_degree)
+    
     s1_new_entry.prefetch_degree(i) := MuxCase(base_degree, Seq(
       is_promote(i) -> Mux(base_degree < max_degree, base_degree + 1.U, base_degree),
       is_demote(i)  -> Mux(base_degree > 0.U, base_degree - 1.U, base_degree)
     ))
+
+    // demote_epoch 逻辑:
+    //   - 如果新 degree == 0 且旧 degree != 0（刚降到 0）: 记录当前 epoch
+    //   - 如果新 degree == 0 且旧 degree == 0（保持 0，未被 epoch reset）: 保留旧 epoch
+    //   - 如果新 degree != 0: epoch 无意义，置 0
+    val old_was_zero = s1_update_hit && (s1_update_read_entry.prefetch_degree(i) === 0.U) && !epoch_reset
+    s1_new_entry.demote_epoch(i) := Mux(s1_new_entry.prefetch_degree(i) === 0.U,
+      Mux(old_was_zero, s1_update_read_entry.demote_epoch(i), global_epoch),
+      0.U
+    )
   }
 
   // ========== 默认输出 ==========
@@ -560,24 +619,31 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
 
   when (s1_should_write) {
     io.allocation_alloc := !s1_update_hit
-    io.allocation_alloc_repl := !s1_update_hit && s1_update_read_entry.valid
+    io.allocation_alloc_repl := !s1_update_hit && s1_update_slot_valid
     table.write(s1_update_idx, s1_new_entry)
+    valids(s1_update_idx) := true.B
     // 更新旁路寄存器 - 逐字段赋值避免 CIRCT packed array 问题
     bypass_valid := true.B
     bypass_idx := s1_update_idx
-    bypass_entry.valid := s1_new_entry.valid
     bypass_entry.pc_hash_tag := s1_new_entry.pc_hash_tag
     for (i <- 0 until num_prefetchers) {
       bypass_entry.prefetch_degree(i) := s1_new_entry.prefetch_degree(i)
+      bypass_entry.demote_epoch(i) := s1_new_entry.demote_epoch(i)
     }
     
     // Debug: allocation_update 更新结果
-    printf(p"[AllocationTable] Update: pc_hash=0x${Hexadecimal(s1_update_pc_hash)}, idx=${s1_update_idx}, hit=${s1_update_hit}\n")
+    printf(p"[AllocationTable] Update: pc_hash=0x${Hexadecimal(s1_update_pc_hash)}, idx=${s1_update_idx}, hit=${s1_update_hit}, epoch=${global_epoch}\n")
     for (i <- 0 until num_prefetchers) {
-      val old_degree = Mux(s1_update_hit, s1_update_read_entry.prefetch_degree(i), 1.U)
+      val raw_degree = Mux(s1_update_hit, s1_update_read_entry.prefetch_degree(i), 1.U)
+      val epoch_reset = s1_update_hit && epochExpired(
+        s1_update_read_entry.prefetch_degree(i), s1_update_read_entry.demote_epoch(i))
+      val old_degree = Mux(epoch_reset, 1.U, raw_degree)
       printf(p"  [prefetcher ${i.U}] issued=${s1_update_issued(i)}, confirmed=${s1_update_confirmed(i)}, ")
       printf(p"promote=${is_promote(i)}, demote=${is_demote(i)}, ")
-      printf(p"degree: ${old_degree} -> ${s1_new_entry.prefetch_degree(i)}\n")
+      printf(p"degree: ${old_degree} -> ${s1_new_entry.prefetch_degree(i)}")
+      when (epoch_reset) { printf(p" (epoch_reset)") }
+      when (s1_new_entry.prefetch_degree(i) === 0.U) { printf(p" demote_epoch=${s1_new_entry.demote_epoch(i)}") }
+      printf(p"\n")
     }
   } .otherwise {
     bypass_valid := false.B
