@@ -590,7 +590,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     if (enableIntegratedPrefetcher) {
       require(enabledPrefetchers.nonEmpty, 
         "IntegratedPrefetcher requires at least one sub-prefetcher to be enabled")
-      printf(p"Enabling IntegratedPrefetcher with ${enabledPrefetchers.size} sub-prefetchers\n")
       Module(new IntegratedPrefetcher(enabledPrefetchers))
     } else {
       require(enabledPrefetchers.size == 1, 

@@ -39,6 +39,8 @@ trait HasAlectoParameters extends HasL1PrefetcherHelper {
     val ALLOCATION_EPOCH_WIDTH = 8           // 8-bit epoch counter (wraps every 256 ticks, ~131K cycles)
     val ALLOCATION_EPOCH_CYCLE_BITS = 9     // Each epoch tick = 512 cycles (~0.5us @ 1GHz)
     val ALLOCATION_RESET_EPOCH_THRESHOLD = 2 // Reset degree after 2 epoch ticks (~1024 cycles)
+    val ALLOCATION_SUPPRESS_COUNT_WIDTH = 3  // 连续抑制轮次计数宽度（0~7）
+    val ALLOCATION_RESET_BACKOFF_MODE = "exponential" // "linear" | "exponential"
 }
 
 // ======================= Sandbox Table =========================
@@ -440,6 +442,8 @@ class AllocationTableEntry(num_prefetchers: Int)(implicit p: Parameters) extends
     val pc_hash_tag = UInt(SAMPLE_TABLE_TAG_BITS.W) // PC标签部分
     val prefetch_degree = Vec(num_prefetchers, UInt(ALLOCATION_DEGREE_WIDTH.W)) // 对于各个预取器的预取度
     val demote_epoch = Vec(num_prefetchers, UInt(ALLOCATION_EPOCH_WIDTH.W)) // 记录 degree 降为 0 时的 epoch
+    val suppress_count = Vec(num_prefetchers, UInt(ALLOCATION_SUPPRESS_COUNT_WIDTH.W)) // 连续被抑制轮次
+    val recovered = Vec(num_prefetchers, Bool()) // 标记当前 degree 是否来自 epoch 恢复
 }
 
 class AllocationRequest(implicit p: Parameters) extends BoomBundle with HasAlectoParameters {
@@ -454,6 +458,8 @@ class AllocationResponseBundle(num_prefetchers: Int)(implicit p: Parameters) ext
 class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends BoomModule with HasAlectoParameters {
   require(num_prefetchers > 0 && num_prefetchers <= 4, 
     s"AllocationTable: num_prefetchers must be 1-4, got $num_prefetchers")
+  require(ALLOCATION_RESET_BACKOFF_MODE == "linear" || ALLOCATION_RESET_BACKOFF_MODE == "exponential",
+    s"AllocationTable: ALLOCATION_RESET_BACKOFF_MODE must be 'linear' or 'exponential', got $ALLOCATION_RESET_BACKOFF_MODE")
 
   val io = IO(new Bundle {
     val allocation_update = Flipped(Decoupled(new AllocationUpdate(num_prefetchers)))
@@ -478,9 +484,27 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
     global_epoch := global_epoch + 1.U
   }
 
+  // Helper: adaptive threshold based on continuous suppression count
+  // linear:      threshold = base + suppress_count
+  // exponential: threshold = base * (2 ^ suppress_count)
+  // both modes saturate to epoch-width max.
+  def adaptiveResetThreshold(suppress_count: UInt): UInt = {
+    val max_threshold = (BigInt(1) << ALLOCATION_EPOCH_WIDTH) - 1
+    val table = VecInit((0 until (1 << ALLOCATION_SUPPRESS_COUNT_WIDTH)).map { i =>
+      val value = if (ALLOCATION_RESET_BACKOFF_MODE == "linear") {
+        BigInt(ALLOCATION_RESET_EPOCH_THRESHOLD) + i
+      } else {
+        BigInt(ALLOCATION_RESET_EPOCH_THRESHOLD) << i
+      }
+      val saturated = if (value > max_threshold) max_threshold else value
+      saturated.U(ALLOCATION_EPOCH_WIDTH.W)
+    })
+    table(suppress_count)
+  }
+
   // Helper: check if a degree-0 entry has cooled down enough to be reset to 1
-  def epochExpired(degree: UInt, demote_epoch: UInt): Bool = {
-    degree === 0.U && ((global_epoch - demote_epoch) >= ALLOCATION_RESET_EPOCH_THRESHOLD.U)
+  def epochExpired(degree: UInt, demote_epoch: UInt, suppress_count: UInt): Bool = {
+    degree === 0.U && ((global_epoch - demote_epoch) >= adaptiveResetThreshold(suppress_count))
   }
 
   // ========== 地址解析辅助函数 ==========
@@ -527,7 +551,10 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
     for (i <- 0 until num_prefetchers) {
       // 如果 degree==0 且 epoch 已过期，返回 1（给预取器重新尝试的机会）
       s1_req_resp.prefetch_degree(i) := Mux(
-        epochExpired(s1_req_read_entry.prefetch_degree(i), s1_req_read_entry.demote_epoch(i)),
+        epochExpired(
+          s1_req_read_entry.prefetch_degree(i),
+          s1_req_read_entry.demote_epoch(i),
+          s1_req_read_entry.suppress_count(i)),
         1.U,
         s1_req_read_entry.prefetch_degree(i)
       )
@@ -548,7 +575,7 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
       printf(p"[AllocationTable] Req HIT: pc_hash=0x${Hexadecimal(s1_req_pc_hash)}, idx=${s1_req_idx}, degrees=")
       for (i <- 0 until num_prefetchers) {
         val raw_deg = s1_req_read_entry.prefetch_degree(i)
-        val expired = epochExpired(raw_deg, s1_req_read_entry.demote_epoch(i))
+        val expired = epochExpired(raw_deg, s1_req_read_entry.demote_epoch(i), s1_req_read_entry.suppress_count(i))
         printf(p"[${i.U}]=${s1_req_resp.prefetch_degree(i)}")
         when (expired) { printf(p"(reset)") }
         printf(p" ")
@@ -590,11 +617,15 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
   s1_new_entry.pc_hash_tag := Mux(s1_update_hit, s1_update_read_entry.pc_hash_tag, s1_update_tag)
   
   val max_degree = (1.U << ALLOCATION_DEGREE_WIDTH) - 1.U
+  val max_suppress_count = (1.U << ALLOCATION_SUPPRESS_COUNT_WIDTH) - 1.U
   for (i <- 0 until num_prefetchers) {
     // base_degree: 命中时从旧 entry 读取，同时应用 epoch recovery
     val raw_degree = Mux(s1_update_hit, s1_update_read_entry.prefetch_degree(i), 1.U)
+    // 更新时命中了一个表项，且该表项相对于上一次更新已经过了足够的 epoch，认为是“冷”了，重置 degree 到 1
     val epoch_reset = s1_update_hit && epochExpired(
-      s1_update_read_entry.prefetch_degree(i), s1_update_read_entry.demote_epoch(i))
+      s1_update_read_entry.prefetch_degree(i),
+      s1_update_read_entry.demote_epoch(i),
+      s1_update_read_entry.suppress_count(i))
     val base_degree = Mux(epoch_reset, 1.U, raw_degree)
     
     s1_new_entry.prefetch_degree(i) := MuxCase(base_degree, Seq(
@@ -602,14 +633,53 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
       is_demote(i)  -> Mux(base_degree > 0.U, base_degree - 1.U, base_degree)
     ))
 
-    // demote_epoch 逻辑:
-    //   - 如果新 degree == 0 且旧 degree != 0（刚降到 0）: 记录当前 epoch
-    //   - 如果新 degree == 0 且旧 degree == 0（保持 0，未被 epoch reset）: 保留旧 epoch
-    //   - 如果新 degree != 0: epoch 无意义，置 0
+    // ---- 恢复检测与抑制轮次逻辑 ----
+    // old_was_zero: SRAM中degree本身就是0且尚未epoch恢复（仍在冷却期）
     val old_was_zero = s1_update_hit && (s1_update_read_entry.prefetch_degree(i) === 0.U) && !epoch_reset
+    val old_suppress_count = Mux(s1_update_hit, s1_update_read_entry.suppress_count(i), 0.U)
+    val old_recovered = s1_update_hit && s1_update_read_entry.recovered(i)
+    val increased_suppress_count = Mux(old_suppress_count < max_suppress_count,
+      old_suppress_count + 1.U,
+      old_suppress_count)
+
+    // 判断"恢复后再次被demote到0"的两种情况：
+    // 1) 同一update内: epoch_reset=true → base_degree=1 → demote → new_degree=0
+    // 2) 跨update: 上一次update写回了degree>0+recovered=true，本次update demote到0
+    val transition_to_zero = (s1_new_entry.prefetch_degree(i) === 0.U) && !old_was_zero
+    val re_suppress_after_recovery = transition_to_zero && (epoch_reset || old_recovered)
+
+    // demote_epoch:
+    //   - degree==0 且一直是0 (old_was_zero): 保留旧 epoch
+    //   - degree==0 且刚降到0 (transition_to_zero): 记录当前 epoch
+    //   - degree>0: 无意义，置0
     s1_new_entry.demote_epoch(i) := Mux(s1_new_entry.prefetch_degree(i) === 0.U,
       Mux(old_was_zero, s1_update_read_entry.demote_epoch(i), global_epoch),
       0.U
+    )
+
+    // suppress_count:
+    //   - degree==0 且 old_was_zero: 保留旧值
+    //   - degree==0 且 re_suppress: 自增
+    //   - degree==0 且首次demote(非恢复后): 归零
+    //   - degree>0: 归零
+    s1_new_entry.suppress_count(i) := Mux(s1_new_entry.prefetch_degree(i) === 0.U,
+      Mux(old_was_zero,
+        old_suppress_count,
+        Mux(re_suppress_after_recovery, increased_suppress_count, 0.U)),
+      0.U
+    )
+
+    // recovered 标记:
+    //   - epoch恢复后 degree>0: 设为true（标记来源是恢复）
+    //   - degree被promote到>1（真正站稳了）: 清除 recovered
+    //   - degree==0: 无意义，清除
+    //   - 其他(degree==1但非恢复来源): 保留旧值
+    s1_new_entry.recovered(i) := Mux(s1_new_entry.prefetch_degree(i) === 0.U,
+      false.B,
+      Mux(s1_new_entry.prefetch_degree(i) > 1.U,
+        false.B, // degree>1 说明已经成功promote，不再视为"刚恢复"
+        Mux(epoch_reset, true.B, old_recovered) // degree==1: 若本次恢复则标记, 否则保留旧值
+      )
     )
   }
 
@@ -632,6 +702,8 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
     for (i <- 0 until num_prefetchers) {
       bypass_entry.prefetch_degree(i) := s1_new_entry.prefetch_degree(i)
       bypass_entry.demote_epoch(i) := s1_new_entry.demote_epoch(i)
+      bypass_entry.suppress_count(i) := s1_new_entry.suppress_count(i)
+      bypass_entry.recovered(i) := s1_new_entry.recovered(i)
     }
     
     // Debug: allocation_update 更新结果
@@ -639,13 +711,18 @@ class AllocationTable(num_prefetchers: Int)(implicit p: Parameters) extends Boom
     for (i <- 0 until num_prefetchers) {
       val raw_degree = Mux(s1_update_hit, s1_update_read_entry.prefetch_degree(i), 1.U)
       val epoch_reset = s1_update_hit && epochExpired(
-        s1_update_read_entry.prefetch_degree(i), s1_update_read_entry.demote_epoch(i))
+        s1_update_read_entry.prefetch_degree(i),
+        s1_update_read_entry.demote_epoch(i),
+        s1_update_read_entry.suppress_count(i))
       val old_degree = Mux(epoch_reset, 1.U, raw_degree)
       printf(p"  [prefetcher ${i.U}] issued=${s1_update_issued(i)}, confirmed=${s1_update_confirmed(i)}, ")
       printf(p"promote=${is_promote(i)}, demote=${is_demote(i)}, ")
       printf(p"degree: ${old_degree} -> ${s1_new_entry.prefetch_degree(i)}")
       when (epoch_reset) { printf(p" (epoch_reset)") }
-      when (s1_new_entry.prefetch_degree(i) === 0.U) { printf(p" demote_epoch=${s1_new_entry.demote_epoch(i)}") }
+      when (s1_new_entry.prefetch_degree(i) === 0.U) {
+        printf(p" demote_epoch=${s1_new_entry.demote_epoch(i)} suppress_count=${s1_new_entry.suppress_count(i)}")
+      }
+      when (s1_new_entry.recovered(i)) { printf(p" recovered") }
       printf(p"\n")
     }
   } .otherwise {
