@@ -540,6 +540,11 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     event_counters.io.event_signals(37) :=  io.lsu.dcache_nack_num   //d-cache load & store nack number
     event_counters.io.event_signals(38) :=  Mux(io.lsu.perf.acquire, 1.U, 0.U) //dcache send req to next level number
 
+    event_counters.io.event_signals(39) :=  io.lsu.prefetch_source_1_count  //prefetch source 1 count
+    event_counters.io.event_signals(40) :=  io.lsu.prefetch_source_2_count  //prefetch source 2 count
+    event_counters.io.event_signals(41) :=  io.lsu.prefetch_source_3_count  //prefetch source 3 count
+    event_counters.io.event_signals(42) :=  io.lsu.prefetch_source_4_count  //prefetch source 4 count
+
     event_counters.io.event_signals(47) :=  PopCount(com_is_ld.asUInt)       //commit ld number
     event_counters.io.event_signals(48) :=  PopCount(com_is_st.asUInt)       //commit st number
 

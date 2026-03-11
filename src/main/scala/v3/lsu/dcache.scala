@@ -1003,6 +1003,11 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   // Count secondary MSHR hits (request hits an existing MSHR entry)
   io.lsu.dcache_lsu_sec_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_lsu && mshrs.io.req(w).fire && mshrs.io.block_hit(w)).asUInt)
   io.lsu.dcache_prefetch_sec_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && mshrs.io.req(w).fire && mshrs.io.block_hit(w)).asUInt)
+  //prefetch source breakdown
+  io.lsu.prefetch_source_1_count := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && s2_prefetch_type(w) === 1.U).asUInt)
+  io.lsu.prefetch_source_2_count := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && s2_prefetch_type(w) === 2.U).asUInt)
+  io.lsu.prefetch_source_3_count := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && s2_prefetch_type(w) === 3.U).asUInt)
+  io.lsu.prefetch_source_4_count := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && s2_prefetch_type(w) === 4.U).asUInt)
 
 
   // ========================================================================
