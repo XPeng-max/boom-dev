@@ -614,6 +614,14 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val sample_table: Option[SampleTable] = if (enableAlecto) Some(Module(new SampleTable(enabledPrefetchers.size))) else None
   val allocation_table: Option[AllocationTable] = if (enableAlecto) Some(Module(new AllocationTable(enabledPrefetchers.size))) else None
 
+  // Prefetch Effectiveness Monitor
+  val numEnabledPrefetchers = enabledPrefetchers.size
+  val pf_monitor: Option[GlobalPrefetchMonitor] =
+    if (enableAlecto && enablePrefetching && numEnabledPrefetchers > 0)
+      Some(Module(new GlobalPrefetchMonitor(numEnabledPrefetchers)))
+    else
+      None
+
   // tags
   def onReset = L1BoomMetaData(0.U, ClientMetadata.onReset)
   val meta = Seq.fill(memWidth) { Module(new BoomL1MetadataArray(onReset _)) }
@@ -1009,6 +1017,33 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   io.lsu.prefetch_source_3_count := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && s2_prefetch_type(w) === 3.U).asUInt)
   io.lsu.prefetch_source_4_count := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && s2_prefetch_type(w) === 4.U).asUInt)
 
+  // ========================================================================
+  // Prefetch Effectiveness Monitor - Wire inputs from s2 stage
+  // ========================================================================
+  if (pf_monitor.isDefined) {
+    val mon = pf_monitor.get
+    // Per-prefetcher issued: prefetch request that allocated an MSHR
+    for (i <- 0 until numEnabledPrefetchers) {
+      mon.io.prefetch_issued(i) := s2_valid(0) && s2_type === t_prefetch &&
+                                    s2_prefetch_type === (i + 1).U && mshrs.io.req(0).fire
+    }
+    // Demand miss: LSU request that allocated an MSHR (cache miss)
+    mon.io.demand_issued := widthMap(w => s2_valid(w) && !s2_hit(w) && s2_type === t_lsu && mshrs.io.req(w).fire).reduce(_ || _)
+    for (i <- 0 until numEnabledPrefetchers) {
+      mon.io.prefetch_fetched(i) := metaWriteArb.io.out.fire && metaWriteArb.io.out.bits.data.prefetch_info === (i + 1).U
+    }
+    // Per-prefetcher useful: first demand hit on a line prefetched by this prefetcher
+    for (i <- 0 until numEnabledPrefetchers) {
+      mon.io.prefetch_useful(i) := widthMap(w => s2_valid(w) && s2_hit(w) &&
+        s2_type === t_lsu &&
+        s2_prefetch_info(w) === (i + 1).U &&
+        !s2_visited(w)).reduce(_ || _)
+    }
+    prefetcher.io.pf_throttle := mon.io.pf_throttle
+  }
+  if (pf_monitor.isEmpty) {
+    prefetcher.io.pf_throttle := VecInit(Seq.fill(numEnabledPrefetchers)(false.B))
+  }
 
   // ========================================================================
   // Prefetcher Training Interface

@@ -52,6 +52,7 @@ abstract class DataPrefetcher(num_prefetchers: Int = 1)(implicit edge: TLEdgeOut
 
     // Allocation结果
     val allocation_resp = Flipped(new Valid(new AllocationResponseBundle(num_prefetchers)))
+    val pf_throttle = Input(Vec(num_prefetchers, Bool())) // per-prefetcher throttle
   })
 }
 
@@ -1321,6 +1322,7 @@ class IntegratedPrefetcher(
     pf.io.req_pfHit := io.req_pfHit
     pf.io.mshr_avail := io.mshr_avail
     pf.io.id := (i + 1).U
+    pf.io.pf_throttle := VecInit(io.pf_throttle(i))
     pf.io.allocation_resp.valid := io.allocation_resp.valid
     pf.io.allocation_resp.bits.prefetch_degree(0) := io.allocation_resp.bits.prefetch_degree(i)
     
@@ -1340,9 +1342,9 @@ class IntegratedPrefetcher(
   // Round-Robin 仲裁器公平选择各个预取器的输出
   val arbiter = Module(new RRArbiter(new ArbiterBundle, subPrefetchers.length))
   
-  // 连接子预取器到仲裁器输入
+  // 连接子预取器到仲裁器输入，pf_throttle 直接门控有效位
   for (i <- 0 until subPrefetchers.length) {
-    arbiter.io.in(i).valid := subPrefetchers(i).io.prefetch.valid
+    arbiter.io.in(i).valid := subPrefetchers(i).io.prefetch.valid && !io.pf_throttle(i)
     arbiter.io.in(i).bits.req := subPrefetchers(i).io.prefetch.bits
     arbiter.io.in(i).bits.prefetch_type := subPrefetchers(i).io.prefetch_type
     subPrefetchers(i).io.prefetch.ready := arbiter.io.in(i).ready
