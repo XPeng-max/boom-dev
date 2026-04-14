@@ -178,7 +178,7 @@ class BitVecPrefetchFilter(implicit p: Parameters) extends PrefetchFilter with H
   
   // ========== S1: 判断并更新 ==========
   val s1_bits = Reg(new BoomDCacheReq)
-  val s1_type = Reg(UInt(2.W))
+  val s1_type = Reg(UInt(3.W))
   // val s1_pc_hash = Reg(UInt(HASH_TAG_WIDTH.W))
   val s1_region_bit = Reg(UInt(BITVEC_REGION_BITS.W))
   val s1_bit_mask = Reg(UInt(FILTER_REGION_SIZE.W))

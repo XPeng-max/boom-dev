@@ -145,6 +145,10 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val alecto_sample_allocation_update = Input(Bool())
   val alecto_allocation_alloc = Input(Bool())
   val alecto_allocation_alloc_repl = Input(Bool())
+  val alecto_allocation_ban_1_prefetcher = Input(Bool())
+  val alecto_allocation_ban_2_prefetcher = Input(Bool())
+  val alecto_allocation_ban_3_prefetcher = Input(Bool())
+  val alecto_allocation_ban_4_prefetcher = Input(Bool())
 
   // Enable_PerfCounter_Support: for prefetch source count
   val prefetch_source_1_count = Input(UInt(4.W))
@@ -232,6 +236,10 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   val alecto_sample_allocation_update = Output(Bool())
   val alecto_allocation_alloc = Output(Bool())
   val alecto_allocation_alloc_repl = Output(Bool())
+  val alecto_allocation_ban_1_prefetcher = Output(Bool())
+  val alecto_allocation_ban_2_prefetcher = Output(Bool())
+  val alecto_allocation_ban_3_prefetcher = Output(Bool())
+  val alecto_allocation_ban_4_prefetcher = Output(Bool())
 
   // Enable_PerfCounter_Support: for prefetch source count
   val prefetch_source_1_count = Output(UInt(4.W))
@@ -382,6 +390,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   io.core.alecto_sample_allocation_update := io.dmem.alecto_sample_allocation_update
   io.core.alecto_allocation_alloc := io.dmem.alecto_allocation_alloc
   io.core.alecto_allocation_alloc_repl := io.dmem.alecto_allocation_alloc_repl
+  io.core.alecto_allocation_ban_1_prefetcher := io.dmem.alecto_allocation_ban_1_prefetcher
+  io.core.alecto_allocation_ban_2_prefetcher := io.dmem.alecto_allocation_ban_2_prefetcher
+  io.core.alecto_allocation_ban_3_prefetcher := io.dmem.alecto_allocation_ban_3_prefetcher
+  io.core.alecto_allocation_ban_4_prefetcher := io.dmem.alecto_allocation_ban_4_prefetcher
 
   // Enable_PerfCounter_Support: for prefetch source information
   io.core.prefetch_source_1_count := io.dmem.prefetch_source_1_count

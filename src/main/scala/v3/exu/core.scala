@@ -545,6 +545,11 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     event_counters.io.event_signals(41) :=  io.lsu.prefetch_source_3_count  //prefetch source 3 count
     event_counters.io.event_signals(42) :=  io.lsu.prefetch_source_4_count  //prefetch source 4 count
 
+    event_counters.io.event_signals(43) := Mux(io.lsu.alecto_allocation_ban_1_prefetcher, 1.U, 0.U) //dcache alecto allocation banning 1 prefetcher
+    event_counters.io.event_signals(44) := Mux(io.lsu.alecto_allocation_ban_2_prefetcher, 1.U, 0.U) //dcache alecto allocation banning 2 prefetchers
+    event_counters.io.event_signals(45) := Mux(io.lsu.alecto_allocation_ban_3_prefetcher, 1.U, 0.U) //dcache alecto allocation banning 3 prefetchers
+    event_counters.io.event_signals(46) := Mux(io.lsu.alecto_allocation_ban_4_prefetcher, 1.U, 0.U) //dcache alecto allocation banning 4 prefetchers
+
     event_counters.io.event_signals(47) :=  PopCount(com_is_ld.asUInt)       //commit ld number
     event_counters.io.event_signals(48) :=  PopCount(com_is_st.asUInt)       //commit st number
 

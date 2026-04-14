@@ -996,26 +996,26 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   //Enable_PerfCounter_Support: for dcache information
   io.lsu.dcache_lsu_req_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_lsu).asUInt)
-  io.lsu.dcache_lsu_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && s2_type === t_lsu).asUInt)
+  io.lsu.dcache_lsu_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && !s2_nack(w) && s2_type === t_lsu).asUInt)
   io.lsu.dcache_lsu_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_lsu && mshrs.io.req(w).fire).asUInt)
   io.lsu.dcache_lsu_nack_num := PopCount(widthMap(w => s2_valid(w) && s2_nack(w) && s2_type === t_lsu).asUInt)
   // Check if cache line was prefetched (prefetch_info != NULL_PREFETCH, i.e., != 0)
-  io.lsu.dcache_lsu_prefetch_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && s2_type === t_lsu && s2_prefetch_info(w) =/= PrefetchType.NULL_PREFETCH).asUInt)
+  io.lsu.dcache_lsu_prefetch_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && !s2_nack(w) && s2_type === t_lsu && s2_prefetch_info(w) =/= PrefetchType.NULL_PREFETCH).asUInt)
   io.lsu.dcache_prefetch_req_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch).asUInt)
-  io.lsu.dcache_prefetch_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && s2_type === t_prefetch).asUInt)
+  io.lsu.dcache_prefetch_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && !s2_nack(w) && s2_type === t_prefetch).asUInt)
   io.lsu.dcache_prefetch_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && mshrs.io.req(w).fire).asUInt)
   io.lsu.dcache_prefetch_nack_num := PopCount(widthMap(w => s2_valid(w) && s2_nack(w) && s2_type === t_prefetch).asUInt)
-  io.lsu.dcache_lsu_prefetch_first_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && s2_type === t_lsu && s2_prefetch_info(w) =/= PrefetchType.NULL_PREFETCH && s2_visited(w) === 0.U).asUInt)
+  io.lsu.dcache_lsu_prefetch_first_hit_num := PopCount(widthMap(w => s2_valid(w) && s2_hit(w) && !s2_nack(w) && s2_type === t_lsu && s2_prefetch_info(w) =/= PrefetchType.NULL_PREFETCH && !s2_visited(w)).asUInt)
   // Count cache lines filled by prefetch requests (meta_write with prefetch_info > 0)
   io.lsu.dcache_prefetch_cache_line_num := Mux(metaWriteArb.io.out.fire && metaWriteArb.io.out.bits.data.prefetch_info > 0.U, 1.U, 0.U)
   // Count secondary MSHR hits (request hits an existing MSHR entry)
   io.lsu.dcache_lsu_sec_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_lsu && mshrs.io.req(w).fire && mshrs.io.block_hit(w)).asUInt)
   io.lsu.dcache_prefetch_sec_mshr_num := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && mshrs.io.req(w).fire && mshrs.io.block_hit(w)).asUInt)
   //prefetch source breakdown
-  io.lsu.prefetch_source_1_count := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && s2_prefetch_type(w) === 1.U).asUInt)
-  io.lsu.prefetch_source_2_count := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && s2_prefetch_type(w) === 2.U).asUInt)
-  io.lsu.prefetch_source_3_count := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && s2_prefetch_type(w) === 3.U).asUInt)
-  io.lsu.prefetch_source_4_count := PopCount(widthMap(w => s2_valid(w) && s2_type === t_prefetch && s2_prefetch_type(w) === 4.U).asUInt)
+  io.lsu.prefetch_source_1_count := PopCount(widthMap(w => s0_valid(w) && s0_prefetch_type === 1.U).asUInt)
+  io.lsu.prefetch_source_2_count := PopCount(widthMap(w => s0_valid(w) && s0_prefetch_type === 2.U).asUInt)
+  io.lsu.prefetch_source_3_count := PopCount(widthMap(w => s0_valid(w) && s0_prefetch_type === 3.U).asUInt)
+  io.lsu.prefetch_source_4_count := PopCount(widthMap(w => s0_valid(w) && s0_prefetch_type === 4.U).asUInt)
 
   // ========================================================================
   // Prefetch Effectiveness Monitor - Wire inputs from s2 stage
@@ -1071,9 +1071,18 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   // Connect prefetcher training inputs
   if (enableAlecto) {
     prefetcher.io.allocation_resp <> allocation_table.get.io.allocation_resp
+    val allocation_ban_count = PopCount(allocation_table.get.io.allocation_resp.bits.prefetch_degree.map(_ === 0.U))
+    io.lsu.alecto_allocation_ban_1_prefetcher := allocation_table.get.io.allocation_resp.valid && allocation_ban_count === 1.U
+    io.lsu.alecto_allocation_ban_2_prefetcher := allocation_table.get.io.allocation_resp.valid && allocation_ban_count === 2.U
+    io.lsu.alecto_allocation_ban_3_prefetcher := allocation_table.get.io.allocation_resp.valid && allocation_ban_count === 3.U
+    io.lsu.alecto_allocation_ban_4_prefetcher := allocation_table.get.io.allocation_resp.valid && allocation_ban_count === 4.U
   } else {
     prefetcher.io.allocation_resp.valid := false.B
     prefetcher.io.allocation_resp.bits  := DontCare
+    io.lsu.alecto_allocation_ban_1_prefetcher := false.B
+    io.lsu.alecto_allocation_ban_2_prefetcher := false.B
+    io.lsu.alecto_allocation_ban_3_prefetcher := false.B
+    io.lsu.alecto_allocation_ban_4_prefetcher := false.B
   }
   prefetcher.io.mshr_avail := mshrs.io.mshr_avail
   prefetcher.io.req_val    := s2_train_valid
