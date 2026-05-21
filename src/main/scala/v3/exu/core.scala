@@ -509,15 +509,15 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     event_counters.io.event_signals(9) := io.lsu.dcache_lsu_hit_num          //dcache hit number
     event_counters.io.event_signals(10) := io.lsu.dcache_lsu_mshr_num          //dcache mshr req number
     event_counters.io.event_signals(11) := io.lsu.dcache_lsu_nack_num          //dcache nack number
-    event_counters.io.event_signals(12) := io.lsu.dcache_lsu_prefetch_hit_num  //dcache lsu prefetch hit number
+    event_counters.io.event_signals(12) := io.lsu.dcache_lsu_prefetch_hit_num  //LSU cache hits on prefetched lines
 
     // L1 D-Cache statistics for Prefetch requests
     event_counters.io.event_signals(13) := io.lsu.dcache_prefetch_req_num     //dcache prefetch req number
-    event_counters.io.event_signals(14) := io.lsu.dcache_prefetch_hit_num     //dcache prefetch hit number
+    event_counters.io.event_signals(14) := io.lsu.dcache_prefetch_hit_num     //prefetch requests resolved as cache hits
     event_counters.io.event_signals(15) := io.lsu.dcache_prefetch_mshr_num    //dcache prefetch mshr number
-    event_counters.io.event_signals(16) := io.lsu.dcache_prefetch_nack_num    //dcache prefetch nack number
-    event_counters.io.event_signals(17) := io.lsu.dcache_lsu_prefetch_first_hit_num  //dcache prefetched cache line first lsu access number
-    event_counters.io.event_signals(18) := io.lsu.dcache_prefetch_cache_line_num     //number of cache lines filled by prefetch requests
+    event_counters.io.event_signals(16) := io.lsu.dcache_prefetch_nack_num    //prefetch misses dropped before entering MSHR
+    event_counters.io.event_signals(17) := io.lsu.dcache_lsu_prefetch_first_hit_num  //prefetched cache lines first used after install
+    event_counters.io.event_signals(18) := io.lsu.dcache_prefetch_cache_line_num     //prefetch lines installed into cache
     event_counters.io.event_signals(19) := io.lsu.dcache_lsu_sec_mshr_num            //dcache lsu secondary mshr hit number
     event_counters.io.event_signals(20) := io.lsu.dcache_prefetch_sec_mshr_num       //dcache prefetch secondary mshr hit number
 
@@ -530,6 +530,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     event_counters.io.event_signals(26) := Mux(io.lsu.alecto_allocation_alloc, 1.U, 0.U) //dcache alecto allocation
     event_counters.io.event_signals(27) := Mux(io.lsu.alecto_sample_discard_allocation_update, 1.U, 0.U) //dcache alecto allocation update discarded count
     event_counters.io.event_signals(28) := Mux(io.lsu.alecto_sample_allocation_update, 1.U, 0.U) //dcache alecto allocation update count
+
+    event_counters.io.event_signals(29) := io.lsu.dcache_prefetch_mshr_useful_line_num //prefetched line first used while in MSHR
 
     event_counters.io.event_signals(31) :=  PopCount(exe_is_ld.asUInt)       //execute ld number
     event_counters.io.event_signals(32) :=  PopCount(exe_is_st.asUInt)       //execute st number
@@ -552,6 +554,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
 
     event_counters.io.event_signals(47) :=  PopCount(com_is_ld.asUInt)       //commit ld number
     event_counters.io.event_signals(48) :=  PopCount(com_is_st.asUInt)       //commit st number
+    event_counters.io.event_signals(50) :=  io.lsu.dcache_prefetch_mshr_lsu_hit_num   //LSU requests merged into prefetched MSHRs
 
     event_counters.io.event_signals(57) :=  Mux(io.ptw.perf.l2miss, 1.U, 0.U) //L2 TLB miss
     event_counters.io.event_signals(58) :=  Mux(misalign_excpt, 1.U, 0.U)  //misalign_excpt

@@ -94,6 +94,9 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     // Writeback unit tells us when it is done processing our wb
     val wb_resp     = Input(Bool())
 
+    val prefetch_line = Output(Bool())
+    val prefetch_first_lsu_hit = Output(Bool())
+
     val probe_rdy   = Output(Bool())
   })
 
@@ -144,6 +147,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   val commit_line = Reg(Bool())
   val grant_had_data = Reg(Bool())
   val finish_to_prefetch = Reg(Bool())
+  val demand_seen = RegInit(false.B)
 
   // Block probes if a tag write we started is still in the pipeline
   val meta_hazard = RegInit(0.U(2.W))
@@ -185,15 +189,19 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   io.lb_read.valid       := false.B
   io.lb_read.bits        := DontCare
   io.mem_grant.ready     := false.B
+  io.prefetch_line       := req.prefetch_info =/= PrefetchType.NULL_PREFETCH
+  io.prefetch_first_lsu_hit := false.B
 
   when (io.req_sec_val && io.req_sec_rdy) {
     req.uop.mem_cmd := dirtier_cmd
-    // Update prefetch info if new secondary miss is a prefetch and we haven't written meta yet
-    when (io.req.prefetch_info =/= 0.U) {
-      req.prefetch_info := io.req.prefetch_info
-    }
     when (is_hit_again) {
       new_coh := dirtier_coh
+    }
+    when (!isPrefetch(io.req.uop.mem_cmd) &&
+          req.prefetch_info =/= PrefetchType.NULL_PREFETCH &&
+          !demand_seen) {
+      demand_seen := true.B
+      io.prefetch_first_lsu_hit := true.B
     }
   }
 
@@ -203,6 +211,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     refill_ctr := 0.U
     assert(rpq.io.enq.ready)
     req := io.req
+    demand_seen := false.B
     val old_coh   = io.req.old_meta.coh
     req_needs_wb := old_coh.onCacheControl(M_FLUSH)._1 // does the line we are evicting need to be written back
     when (io.req.tag_match) {
@@ -322,8 +331,9 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.data.coh := coh_on_clear
     io.meta_write.bits.data.tag := req_tag
     io.meta_write.bits.way_en   := req.way_en
-    io.meta_write.bits.data.prefetch_info := req.prefetch_info
+    io.meta_write.bits.data.prefetch_info := PrefetchType.NULL_PREFETCH
     io.meta_write.bits.clear_visited := true.B  // coh_on_clear is Nothing, cache line invalidated
+    io.meta_write.bits.set_visited := false.B
 
     when (io.meta_write.fire) {
       state      := s_wb_req
@@ -381,6 +391,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.way_en   := req.way_en
     io.meta_write.bits.data.prefetch_info := req.prefetch_info
     io.meta_write.bits.clear_visited := !req.tag_match  // Clear visited only when tag changes (new cache line)
+    io.meta_write.bits.set_visited := demand_seen
     when (io.meta_write.fire) {
       state := s_mem_finish_1
       finish_to_prefetch := false.B
@@ -534,6 +545,8 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val resp = Decoupled(new BoomDCacheResp)
     val secondary_miss = Output(Vec(memWidth, Bool()))
     val block_hit = Output(Vec(memWidth, Bool()))
+    val prefetch_block_hit = Output(Vec(memWidth, Bool()))
+    val prefetch_first_lsu_hit_num = Output(UInt(4.W))
 
     val brupdate       = Input(new BrUpdateInfo)
     val exception    = Input(Bool())
@@ -611,6 +624,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   val idx_matches = Wire(Vec(memWidth, Vec(cfg.nMSHRs, Bool())))
   val tag_matches = Wire(Vec(memWidth, Vec(cfg.nMSHRs, Bool())))
   val way_matches = Wire(Vec(memWidth, Vec(cfg.nMSHRs, Bool())))
+  val prefetch_matches = Wire(Vec(memWidth, Vec(cfg.nMSHRs, Bool())))
 
   val tag_match   = widthMap(w => Mux1H(idx_matches(w), tag_matches(w)))
   val idx_match   = widthMap(w => idx_matches(w).reduce(_||_))
@@ -648,6 +662,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
       idx_matches(w)(i) := mshr.io.idx.valid && mshr.io.idx.bits === io.req(w).bits.addr(untagBits-1,blockOffBits)
       tag_matches(w)(i) := mshr.io.tag.valid && mshr.io.tag.bits === io.req(w).bits.addr >> untagBits
       way_matches(w)(i) := mshr.io.way.valid && mshr.io.way.bits === io.req(w).bits.way_en
+      prefetch_matches(w)(i) := idx_matches(w)(i) && tag_matches(w)(i) && mshr.io.prefetch_line
     }
     wb_tag_list(i) := mshr.io.wb_req.bits.tag
 
@@ -771,7 +786,9 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
       Mux(!cacheable, mmio_rdy, sdq_rdy && Mux(idx_match(w), tag_match(w) && sec_rdy, pri_rdy))
     io.secondary_miss(w) := idx_match(w) && way_match(w) && !tag_match(w)
     io.block_hit(w)      := idx_match(w) && tag_match(w)
+    io.prefetch_block_hit(w) := prefetch_matches(w).reduce(_||_)
   }
+  io.prefetch_first_lsu_hit_num := PopCount(VecInit(mshrs.map(_.io.prefetch_first_lsu_hit)).asUInt)
   io.refill         <> refill_arb.io.out
 
   val free_sdq = io.replay.fire && isWrite(io.replay.bits.uop.mem_cmd)

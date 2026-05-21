@@ -135,6 +135,8 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val dcache_prefetch_cache_line_num = Input(UInt(4.W))
   val dcache_lsu_sec_mshr_num      = Input(UInt(4.W))
   val dcache_prefetch_sec_mshr_num = Input(UInt(4.W))
+  val dcache_prefetch_mshr_useful_line_num = Input(UInt(4.W))
+  val dcache_prefetch_mshr_lsu_hit_num = Input(UInt(4.W))
 
   // Enable_PerfCounter_Support: for alecto information
   val alecto_sandbox_alloc = Input(Bool())
@@ -226,6 +228,8 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   val dcache_prefetch_cache_line_num = Output(UInt(4.W))
   val dcache_lsu_sec_mshr_num      = Output(UInt(4.W))
   val dcache_prefetch_sec_mshr_num = Output(UInt(4.W))
+  val dcache_prefetch_mshr_useful_line_num = Output(UInt(4.W))
+  val dcache_prefetch_mshr_lsu_hit_num = Output(UInt(4.W))
 
   // Enable_PerfCounter_Support: for alecto information
   val alecto_sandbox_alloc = Output(Bool())
@@ -380,6 +384,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   io.core.dcache_prefetch_cache_line_num := io.dmem.dcache_prefetch_cache_line_num
   io.core.dcache_lsu_sec_mshr_num     := io.dmem.dcache_lsu_sec_mshr_num
   io.core.dcache_prefetch_sec_mshr_num := io.dmem.dcache_prefetch_sec_mshr_num
+  io.core.dcache_prefetch_mshr_useful_line_num := io.dmem.dcache_prefetch_mshr_useful_line_num
+  io.core.dcache_prefetch_mshr_lsu_hit_num := io.dmem.dcache_prefetch_mshr_lsu_hit_num
 
   // Enable_PerfCounter_Support: for alecto information (dmem -> core passthrough)
   io.core.alecto_sandbox_alloc := io.dmem.alecto_sandbox_alloc
